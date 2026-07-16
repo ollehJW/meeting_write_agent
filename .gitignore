@@ -1,0 +1,54 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+/*.py
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.claude/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local app state
+backend/*.db
+backend/*.db-*
+jobs/
+.jobs_work/
+
+# Audio and generated meeting artifacts
+*.m4a
+*.mp3
+*.wav
+*.flac
+**/result.json
+**/refined_result.json
+**/speaker_matches.json
+**/stt_corrections.json
+**/meeting_report.md
+
+# Local model weights and downloaded model directories
+*.pt
+*.pth
+*.bin
+*.safetensors
+qwen3-asr-1.7b/
+pyannote_diarization_local/
+pyannote_segmentation_local/
+pyannote_embedding_local/
+
+# OS / editor
+.DS_Store
+.vscode/
