@@ -16,6 +16,11 @@ function matchBySpeaker(matchesData, speakerId) {
   return (matchesData?.matches || []).find((match) => Number(match.speaker_id) === Number(speakerId));
 }
 
+async function apiError(response, fallbackMessage) {
+  const data = await response.json().catch(() => ({}));
+  return new Error(data.detail || fallbackMessage);
+}
+
 function MarkdownReport({ markdown }) {
   return (
     <article className="markdown-report">
@@ -1007,7 +1012,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mapping: speakerMapping, sentences: result?.sentences || [] }),
       });
-      if (!response.ok) throw new Error('화자 매핑 저장에 실패했습니다.');
+      if (!response.ok) throw await apiError(response, '화자 매핑 저장에 실패했습니다.');
       const data = await response.json();
       setMappedSentences(data.sentences || []);
       setSpeakerMatches(data.speaker_matches || { matches: [] });
@@ -1029,7 +1034,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ special_instruction: reportInstruction }),
       });
-      if (!response.ok) throw new Error('회의록 생성에 실패했습니다.');
+      if (!response.ok) throw await apiError(response, '회의록 생성에 실패했습니다.');
       const data = await response.json();
       setReportMarkdown(data.report_markdown || '');
       setModalMode('report_review');
@@ -1050,7 +1055,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ report_markdown: reportMarkdown }),
       });
-      if (!response.ok) throw new Error('회의록 확정 저장에 실패했습니다.');
+      if (!response.ok) throw await apiError(response, '회의록 확정 저장에 실패했습니다.');
       setReportCompleted(true);
       setCurrentView('report');
       setModalOpen(false);
@@ -1098,7 +1103,7 @@ function App() {
       const response = await fetch(`${API_BASE}/api/jobs/${job.job_id}/complete`, {
         method: 'POST',
       });
-      if (!response.ok) throw new Error('회의록 저장 완료 처리에 실패했습니다.');
+      if (!response.ok) throw await apiError(response, '회의록 저장 완료 처리에 실패했습니다.');
       resetMeetingWorkflow();
     } catch (err) {
       setError(err.message);

@@ -615,6 +615,7 @@ def run_job(job_id: str):
             progress=100,
             message="처리가 완료되었습니다. 화자 매핑을 확인하세요.",
             result={**result, "sentences": postprocess["corrected_sentences"]},
+            original_result=postprocess["original_sentences"],
             refined_result=postprocess["refined_sentences"],
             stt_corrections=postprocess["stt_corrections"],
             speaker_matches=postprocess["speaker_matches"],
@@ -1031,6 +1032,7 @@ def create_job(
             "speaker_mapping": {},
             "speaker_matches": {"matches": []},
             "stt_corrections": {"corrections": []},
+            "original_result": None,
             "refined_result": None,
             "participants": parse_participants(participants),
             "meeting_metadata": meeting_metadata,
@@ -1074,6 +1076,7 @@ def get_result(job_id: str):
         return {
             "job_id": job_id,
             "result": job["result"],
+            "original_result": job.get("original_result"),
             "refined_result": job.get("refined_result"),
             "speaker_mapping": job.get("speaker_mapping", {}),
             "speaker_matches": job.get("speaker_matches", {"matches": []}),
@@ -1159,6 +1162,7 @@ def create_report(job_id: str, request: ReportRequest):
 
     prompt = build_prompt(transcript_text, request.special_instruction)
     report_markdown = generate_report(prompt).strip()
+    output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "meeting_report.md").write_text(report_markdown + "\n", encoding="utf-8")
 
     with jobs_lock:
@@ -1181,6 +1185,7 @@ def finalize_report(job_id: str, request: ReportFinalizeRequest):
             raise HTTPException(status_code=404, detail="Job not found.")
         output_dir = Path(job.get("report_dir", job["output_dir"]))
 
+    output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "meeting_report.md").write_text(report_markdown + "\n", encoding="utf-8")
 
     with jobs_lock:
@@ -1391,6 +1396,7 @@ def get_meeting_report_audio(job_id: str, authorization: str | None = Header(def
 @app.get("/api/jobs/{job_id}/download/{filename}")
 def download_file(job_id: str, filename: str):
     path_by_filename = {
+        "original_result.json": JOB_ROOT / job_id / "meta" / "original_result.json",
         "refined_result.json": JOB_ROOT / job_id / "meta" / "refined_result.json",
         "speaker_matches.json": JOB_ROOT / job_id / "meta" / "speaker_matches.json",
         "meeting_metadata.json": JOB_ROOT / job_id / "meta" / "meeting_metadata.json",

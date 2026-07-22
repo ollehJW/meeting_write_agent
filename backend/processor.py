@@ -278,7 +278,7 @@ def extract_json_object(text):
 def format_transcript_for_llm(sentences):
     return "\n".join(
         f"[{sentence['index']}] Speaker {sentence.get('speaker_id', sentence['speaker'])} "
-        f"({sentence.get('time', '')}): {sentence.get('content', '').strip()}"
+        f": {sentence.get('content', '').strip()}"
         for sentence in sentences
         if sentence.get("content", "").strip()
     )
@@ -402,6 +402,12 @@ def run_llm_postprocess(result, output_dir: Path, participant_list, meeting_purp
     for sentence in sentences:
         sentence.setdefault("speaker_id", sentence["speaker"])
 
+    original_sentences = [sentence.copy() for sentence in sentences]
+    (output_dir / "original_result.json").write_text(
+        json.dumps(original_sentences, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
     notify(progress, "stt_correction", 90, "STT 결과를 교정하고 있습니다.")
     corrections = find_stt_corrections(sentences, participant_list, meeting_purpose, meeting_reference_text)
     sentences, applied_corrections = apply_stt_corrections(sentences, corrections)
@@ -413,6 +419,7 @@ def run_llm_postprocess(result, output_dir: Path, participant_list, meeting_purp
     mapped_sentences = apply_speaker_matches(sentences, matches_data, output_dir)
     notify(progress, "mapping_review", 99, "화자 매칭 결과를 확인할 준비가 되었습니다.")
     return {
+        "original_sentences": original_sentences,
         "corrected_sentences": sentences,
         "stt_corrections": stt_corrections_output,
         "speaker_matches": matches_data,
