@@ -122,6 +122,7 @@ function App() {
   const [isLoadingLoungeAudio, setIsLoadingLoungeAudio] = useState(false);
   const [loungeAudioUrl, setLoungeAudioUrl] = useState('');
   const [meetingInfoOpen, setMeetingInfoOpen] = useState(false);
+  const [processGuideOpen, setProcessGuideOpen] = useState(false);
   const [isDownloadingReferences, setIsDownloadingReferences] = useState(false);
   const [reportCompleted, setReportCompleted] = useState(false);
   const [editingSentence, setEditingSentence] = useState(null);
@@ -232,6 +233,14 @@ function App() {
 
   const currentKstMonth = useMemo(() => formatMonthKey(getKstToday()), []);
   const canMoveHomeCategoryMonthNext = homeCategoryMonth < currentKstMonth;
+  const creationProcessSteps = [
+    '오디오 분석',
+    '화자 분리',
+    '화자 구간 전처리',
+    'STT 전환',
+    '문맥 기반 교정',
+    '화자 자동 매칭',
+  ];
 
   function moveHomeCategoryMonth(offset) {
     const [year, month] = homeCategoryMonth.split('-').map(Number);
@@ -1330,7 +1339,13 @@ function App() {
             <section className="agent-panel">
               <div className="agent-header">
                 <div className="eyebrow">WIAMeet</div>
-                <h2>회의록 생성</h2>
+                <div className="agent-title-row">
+                  <h2>회의록 생성</h2>
+                  <button className="process-guide-button" type="button" onClick={() => setProcessGuideOpen(true)}>
+                    <Info size={16} />
+                    <span>회의록 생성 프로세스</span>
+                  </button>
+                </div>
                 <p>회의 기본 정보와 녹음 파일을 바탕으로 회의록을 작성합니다.</p>
               </div>
 
@@ -2050,6 +2065,33 @@ function App() {
                 {!(loungeDetail?.references || []).length && <div className="account-empty compact">첨부된 회의 참고자료가 없습니다.</div>}
               </div>
             </section>
+          </div>
+        </section>
+      )}
+
+
+      {currentView === 'create' && <div className={`process-guide-backdrop ${processGuideOpen ? 'open' : ''}`} onClick={() => setProcessGuideOpen(false)} />}
+      {currentView === 'create' && processGuideOpen && (
+        <section className="process-guide-modal" role="dialog" aria-modal="true" aria-labelledby="process-guide-title">
+          <div className="process-guide-head">
+            <div>
+              <span>Process Guide</span>
+              <h3 id="process-guide-title">회의록 생성 프로세스</h3>
+            </div>
+            <button className="icon-btn" type="button" onClick={() => setProcessGuideOpen(false)} aria-label="프로세스 가이드 닫기"><X size={18} /></button>
+          </div>
+          <div className="process-guide-body">
+            <div className="process-flow" aria-label="회의록 생성 프로세스 플로우">
+              {creationProcessSteps.map((step, index) => (
+                <div className="process-flow-item" key={step}>
+                  <div className="process-flow-node">
+                    <span>{index + 1}</span>
+                    <b>{step}</b>
+                  </div>
+                  {index < creationProcessSteps.length - 1 && <div className="process-flow-connector" aria-hidden="true" />}
+                </div>
+              ))}
+            </div>
           </div>
         </section>
       )}
