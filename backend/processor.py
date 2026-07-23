@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 from typing import Callable
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 import torch
@@ -26,7 +25,8 @@ except ImportError as exc:
 log = logging.getLogger(__name__)
 
 STT_MODEL_PATH = "./qwen3-asr-1.7b"
-DIARIZATION_MODEL_PATH = "./pyannote_diarization_local"
+DIARIZATION_MODEL_ID = "pyannote/speaker-diarization-community-1"
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN")
 MAX_MERGE_SILENCE_S = 10.0
 MIN_SEGMENT_DURATION_S = 1.5
 MAX_STT_SEGMENT_DURATION_S = 30.0
@@ -440,8 +440,13 @@ def transcribe_meeting(audio_path: Path, output_dir: Path, progress: ProgressCal
     notify(progress, "loading", 8, audio_loaded_message)
 
     notify(progress, "diarization", 12, "화자 분리 모델을 로드하고 있습니다.")
+    if not HF_TOKEN:
+        raise RuntimeError("HF_TOKEN or HUGGINGFACE_HUB_TOKEN is required for pyannote diarization.")
     t = time.time()
-    diarization_pipeline = Pipeline.from_pretrained(DIARIZATION_MODEL_PATH)
+    diarization_pipeline = Pipeline.from_pretrained(
+        DIARIZATION_MODEL_ID,
+        token=HF_TOKEN,
+    )
     diarization_pipeline.to(DEVICE)
     log.info("pyannote 파이프라인 로드 완료 (%s)", elapsed(t))
 
