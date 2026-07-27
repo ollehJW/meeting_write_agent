@@ -7,6 +7,73 @@ import './styles.css';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '';
 const RECORD_BAR_COUNT = 28;
+const USER_GUIDE_MARKDOWN = `# 사용 가이드
+
+## 1. 과제 카테고리 관리
+
+회의록은 반드시 하나의 과제 카테고리에 저장됩니다. 먼저 **설정 > 카테고리 관리**에서 과제명을 등록해두면 회의록 생성 시 카테고리를 선택할 수 있습니다.
+
+- 새 과제는 카테고리명 입력 후 추가합니다.
+- 드래그로 카테고리 순서를 바꿀 수 있습니다.
+- 사용하지 않는 카테고리는 삭제할 수 있지만, 이미 저장된 회의록 분류 기준과 연결될 수 있으니 신중히 관리합니다.
+
+## 2. 회의 녹음
+
+**회의 녹음** 메뉴에서 현재 접속한 컴퓨터의 마이크로 바로 녹음할 수 있습니다.
+
+- 녹음 시작 후 일시정지, 재개, 종료가 가능합니다.
+- 녹음이 끝나면 브라우저가 만든 원본 오디오 파일이 생성됩니다.
+- **회의록 생성으로 이동**을 누르면 녹음 파일이 생성 화면에 자동으로 연결됩니다.
+- **다운로드**를 누르면 녹음 파일을 로컬에 저장할 수 있습니다.
+
+## 3. 회의록 생성 프로세스
+
+회의록 생성은 업로드된 오디오와 입력한 회의 정보를 기준으로 순차 실행됩니다.
+
+### 자동 처리 단계
+
+1. 오디오 분석
+2. 화자 분리
+3. 화자 구간 전처리
+4. STT 전환
+5. 문맥 기반 교정
+6. 화자 자동 매칭
+
+### 사용자가 입력해야 하는 정보
+
+회의록 생성을 시작하기 전에 아래 항목을 입력하거나 선택해야 합니다.
+
+- 회의 제목
+- 과제 카테고리
+- 회의 목적
+- 회의 날짜와 시작/종료 시간
+- 주관 부서 또는 조직
+- 참석자
+- 회의 녹음 파일
+- 참고자료와 추가 참고 내용은 선택 입력입니다.
+
+### 사용자가 확인하거나 수정해야 하는 정보
+
+자동 처리가 끝나면 시스템이 추정한 결과를 그대로 확정하지 말고, 아래 항목을 확인합니다.
+
+- 화자 자동 매칭 결과가 실제 참석자와 맞는지 확인합니다.
+- 잘못 매칭된 화자는 직접 올바른 참석자로 변경합니다.
+- STT 결과에서 틀린 문장, 누락된 표현, 잘못 인식된 용어가 있으면 발화 내용을 수정합니다.
+- 화자명이 잘못 붙은 문장은 올바른 화자로 바꿉니다.
+- 회의록 작성 전에 특별히 반영할 작성 지시사항이 있으면 입력합니다.
+- 생성된 회의록 초안을 마지막으로 검토한 뒤 확정 저장합니다.
+
+확정 저장된 회의록은 회의록 라운지에 보관되며, 이후 다시 열람하거나 다운로드할 수 있습니다.
+
+## 4. 회의록 라운지 활용법
+
+**회의록 라운지**는 확정 저장된 회의록을 다시 찾고 검토하는 공간입니다.
+
+- 카테고리와 월 기준으로 회의록을 필터링할 수 있습니다.
+- 회의록 상세를 열어 최종 마크다운 내용을 확인할 수 있습니다.
+- 저장된 원본 오디오가 있으면 라운지에서 함께 재생할 수 있습니다.
+- 필요 시 회의록 본문이나 참고자료를 다운로드해 공유합니다.
+`;
 
 function speakerIdsFromResult(result) {
   const ids = new Set((result?.sentences || []).map((sentence) => sentence.speaker));
@@ -130,6 +197,7 @@ function App() {
   const [loungeAudioUrl, setLoungeAudioUrl] = useState('');
   const [meetingInfoOpen, setMeetingInfoOpen] = useState(false);
   const [processGuideOpen, setProcessGuideOpen] = useState(false);
+  const [userGuideOpen, setUserGuideOpen] = useState(false);
   const [isDownloadingReferences, setIsDownloadingReferences] = useState(false);
   const [reportCompleted, setReportCompleted] = useState(false);
   const [editingSentence, setEditingSentence] = useState(null);
@@ -1387,6 +1455,7 @@ function App() {
             <button className={`side-item ${currentView === 'accounts' ? 'active' : ''}`} onClick={() => setCurrentView('accounts')}><ShieldCheck size={17} /><span className="side-name">계정 권한</span></button>
           )}
         </nav>
+        <button className="side-item side-guide-item" type="button" onClick={() => setUserGuideOpen(true)}><Info size={17} /><span className="side-name">사용 가이드</span></button>
         <div className="side-user">
           <div className="avatar">W</div>
           <div className="side-user-info"><b>{authUser.display_name || authUser.username}</b><span>{authUser.role || 'user'}</span></div>
@@ -2360,6 +2429,24 @@ function App() {
                 </div>
               ))}
             </div>
+          </div>
+        </section>
+      )}
+
+      <div className={`process-guide-backdrop ${userGuideOpen ? 'open' : ''}`} onClick={() => setUserGuideOpen(false)} />
+      {userGuideOpen && (
+        <section className="process-guide-modal usage-guide-modal" role="dialog" aria-modal="true" aria-labelledby="usage-guide-title">
+          <div className="process-guide-head usage-guide-head">
+            <div>
+              <span>Guide</span>
+              <h3 id="usage-guide-title">사용 가이드</h3>
+            </div>
+            <button className="icon-btn" type="button" onClick={() => setUserGuideOpen(false)} aria-label="사용 가이드 닫기"><X size={18} /></button>
+          </div>
+          <div className="process-guide-body usage-guide-body">
+            <article className="usage-guide-markdown">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{USER_GUIDE_MARKDOWN}</ReactMarkdown>
+            </article>
           </div>
         </section>
       )}
