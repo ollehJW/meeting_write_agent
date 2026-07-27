@@ -1600,7 +1600,7 @@ function App() {
                       <div className="pipeline-step active"><span>1</span><b>Upload</b><small>녹음 파일 첨부</small></div>
                       <div className={`pipeline-step ${job ? 'active' : ''}`}><span>2</span><b>Diarization</b><small>화자 분리와 병합</small></div>
                       <div className={`pipeline-step ${job?.progress >= 45 ? 'active' : ''}`}><span>3</span><b>STT</b><small>Qwen3-ASR 변환</small></div>
-                      <div className={`pipeline-step ${job?.progress >= 90 ? 'active' : ''}`}><span>4</span><b>Correction</b><small>STT 결과 교정</small></div>
+                      <div className={`pipeline-step ${job?.progress >= 90 ? 'active' : ''}`}><span>4</span><b>Correction</b><small>문맥 기반 교정</small></div>
                       <div className={`pipeline-step ${job?.progress >= 95 ? 'active' : ''}`}><span>5</span><b>Matching</b><small>화자 자동 매칭</small></div>
                       <div className={`pipeline-step ${job?.status === 'completed' ? 'active' : ''}`}><span>6</span><b>Review</b><small>매핑 확인</small></div>
                     </div>

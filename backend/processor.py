@@ -31,6 +31,7 @@ MAX_MERGE_SILENCE_S = 10.0
 MIN_SEGMENT_DURATION_S = 1.5
 MAX_STT_SEGMENT_DURATION_S = 30.0
 STT_BATCH_SIZE = 8
+CORRECTION_BATCH_SIZE = 50
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DEVICE_MAP = "cuda:0" if torch.cuda.is_available() else "cpu"
 TORCH_DTYPE = torch.bfloat16 if torch.cuda.is_available() else torch.float32
@@ -322,18 +323,67 @@ def keep_first_consecutive_duplicate_content(sentences):
     return cleaned
 
 
-def find_stt_corrections(sentences, participant_list, meeting_purpose="", meeting_reference_text=""):
+def batched(items, batch_size):
+    for start in range(0, len(items), batch_size):
+        yield start // batch_size + 1, items[start:start + batch_size]
+
+
+def build_stt_correction_prompt(sentences, participant_list, meeting_purpose="", meeting_reference_text=""):
     transcript_text = format_transcript_for_llm(sentences)
     purpose_text = meeting_purpose.strip() or "없음"
     reference_text = meeting_reference_text.strip() or "없음"
-    prompt = load_prompt_template("stt_correction.txt").format(
+    return load_prompt_template("stt_correction.txt").format(
         participant_list=participant_list,
         purpose_text=purpose_text,
         reference_text=reference_text,
         transcript_text=transcript_text,
     )
+
+
+def find_stt_corrections_for_batch(sentences, participant_list, meeting_purpose="", meeting_reference_text=""):
+    prompt = build_stt_correction_prompt(
+        sentences,
+        participant_list,
+        meeting_purpose,
+        meeting_reference_text,
+    )
     parsed = extract_json_object(chat_completion(prompt))
     return parsed.get("corrections", []) if parsed else []
+
+
+def find_stt_corrections(sentences, participant_list, meeting_purpose="", meeting_reference_text="", progress=None):
+    all_corrections = []
+    total_batches = max(1, (len(sentences) + CORRECTION_BATCH_SIZE - 1) // CORRECTION_BATCH_SIZE)
+
+    for batch_index, batch_sentences in batched(sentences, CORRECTION_BATCH_SIZE):
+        first_index = batch_sentences[0].get("index", "") if batch_sentences else ""
+        last_index = batch_sentences[-1].get("index", "") if batch_sentences else ""
+        batch_message = (
+            f"문맥 기반 교정 배치 실행 중: {batch_index}/{total_batches} 배치 "
+            f"({len(batch_sentences)}문장, index {first_index}-{last_index})"
+        )
+        log.info(
+            "Running correction batch %s/%s (%s sentences, index %s-%s)",
+            batch_index,
+            total_batches,
+            len(batch_sentences),
+            first_index,
+            last_index,
+        )
+        start_percent = 90 + int(4 * (batch_index - 1) / total_batches)
+        notify(progress, "stt_correction", start_percent, batch_message)
+        all_corrections.extend(
+            find_stt_corrections_for_batch(
+                batch_sentences,
+                participant_list,
+                meeting_purpose,
+                meeting_reference_text,
+            )
+        )
+        percent = 90 + int(4 * batch_index / total_batches)
+        notify(progress, "stt_correction", percent, f"문맥 기반 교정 배치 완료: {batch_index}/{total_batches} 배치")
+
+    return all_corrections
 
 
 def apply_stt_corrections(sentences, corrections):
@@ -408,9 +458,10 @@ def run_llm_postprocess(result, output_dir: Path, participant_list, meeting_purp
         encoding="utf-8",
     )
 
-    notify(progress, "stt_correction", 90, "STT 결과를 교정하고 있습니다.")
-    corrections = find_stt_corrections(sentences, participant_list, meeting_purpose, meeting_reference_text)
+    notify(progress, "stt_correction", 90, "STT 결과를 문맥 기반으로 교정하고 있습니다.")
+    corrections = find_stt_corrections(sentences, participant_list, meeting_purpose, meeting_reference_text, progress)
     sentences, applied_corrections = apply_stt_corrections(sentences, corrections)
+    notify(progress, "stt_correction", 94, f"STT 결과 교정 완료 — {len(applied_corrections)}건 반영")
     stt_corrections_output = {"corrections": applied_corrections}
     sentences = merge_consecutive_transcript_sentences(sentences, MAX_MERGE_SILENCE_S)
 
