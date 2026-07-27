@@ -1824,12 +1824,12 @@ function App() {
                       <label className="upload-box">
                         <input
                           type="file"
-                          accept="audio/*,.m4a,.mp3,.wav,.aac,.flac"
+                          accept="audio/*,.webm,.m4a,.wav,.mp3,.aac,.flac,.ogg"
                           onChange={(event) => setAudioFile(event.target.files?.[0] || null)}
                         />
                         <UploadCloud className="upload-icon" size={34} />
                         <b>{audioFile ? audioFile.name : '녹음 파일을 선택하거나 끌어오세요'}</b>
-                        <span>m4a, wav, mp3 등 오디오 파일을 업로드할 수 있습니다.</span>
+                        <span>webm, m4a, wav, mp3, aac, flac, ogg 파일을 업로드할 수 있습니다.</span>
                       </label>
                     </div>
 
