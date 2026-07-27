@@ -2,10 +2,11 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { BarChart3, Building2, CalendarDays, CheckCircle2, Clock3, Download, FileText, GripVertical, Home, Info, KeyRound, Tags, LogIn, LogOut, Mic2, Pencil, Play, Plus, Settings, ShieldCheck, Trash2, Trophy, UploadCloud, UserRound, UserPlus, X } from 'lucide-react';
+import { AlertTriangle, BarChart3, Building2, CalendarDays, CheckCircle2, Clock3, Download, FileText, GripVertical, Home, Info, KeyRound, Tags, LogIn, LogOut, Mic2, Pause, Pencil, Play, Plus, Settings, ShieldCheck, Square, Trash2, Trophy, UploadCloud, UserRound, UserPlus, X } from 'lucide-react';
 import './styles.css';
 
-const API_BASE = `${window.location.protocol}//${window.location.hostname}:9701`;
+const API_BASE = import.meta.env.VITE_API_BASE || '';
+const RECORD_BAR_COUNT = 28;
 
 function speakerIdsFromResult(result) {
   const ids = new Set((result?.sentences || []).map((sentence) => sentence.speaker));
@@ -85,6 +86,12 @@ function App() {
   const [requiredPasswordError, setRequiredPasswordError] = useState('');
   const [isUpdatingRequiredPassword, setIsUpdatingRequiredPassword] = useState(false);
   const [audioFile, setAudioFile] = useState(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isRecordingPaused, setIsRecordingPaused] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [recordingError, setRecordingError] = useState('');
+  const [recordingBars, setRecordingBars] = useState(() => Array(RECORD_BAR_COUNT).fill(6));
+  const [confirmClearRecording, setConfirmClearRecording] = useState(false);
   const [referenceFiles, setReferenceFiles] = useState([]);
   const [meetingTitle, setMeetingTitle] = useState('');
   const [meetingDate, setMeetingDate] = useState('');
@@ -134,6 +141,10 @@ function App() {
   const logBodyRef = useRef(null);
   const audioRef = useRef(null);
   const loungeAudioRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const mediaStreamRef = useRef(null);
+  const recordingChunksRef = useRef([]);
+  const recordingTimerRef = useRef(null);
 
   const speakerIds = useMemo(() => speakerIdsFromResult(result), [result]);
   const filteredSentences = useMemo(() => {
@@ -142,6 +153,15 @@ function App() {
     return sentences.filter((sentence) => String(sentence.speaker) === selectedSpeakerFilter);
   }, [result, selectedSpeakerFilter]);
   const audioUrl = useMemo(() => (audioFile ? URL.createObjectURL(audioFile) : ''), [audioFile]);
+  const recorderSupported = typeof window !== 'undefined' && Boolean(window.MediaRecorder && navigator.mediaDevices?.getUserMedia);
+  const recordingStatus = isRecording ? (isRecordingPaused ? 'paused' : 'recording') : audioFile ? 'stopped' : 'idle';
+  const recordingStatusLabel = {
+    idle: '녹음 대기',
+    recording: '녹음 중',
+    paused: '일시정지',
+    stopped: '녹음 완료',
+  }[recordingStatus];
+  const recordingHasContent = recordingStatus !== 'idle';
   const selectedCategory = useMemo(() => (
     categories.find((category) => category.category_uuid === selectedCategoryUuid) || null
   ), [categories, selectedCategoryUuid]);
@@ -250,6 +270,132 @@ function App() {
     setHomeCategoryMonth(nextMonth);
   }
 
+  function formatRecordingDuration(seconds) {
+    const minutes = String(Math.floor(seconds / 60)).padStart(2, '0');
+    const rest = String(seconds % 60).padStart(2, '0');
+    return { minutes, seconds: rest };
+  }
+
+  function preferredAudioMimeType() {
+    const candidates = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/mp4',
+    ];
+    return candidates.find((type) => window.MediaRecorder?.isTypeSupported(type)) || '';
+  }
+
+  function recordingFileExtension(mimeType) {
+    if (mimeType.includes('mp4')) return 'm4a';
+    if (mimeType.includes('mpeg')) return 'mp3';
+    return 'webm';
+  }
+
+  function downloadRecordedAudio() {
+    if (!audioFile || !audioUrl) return;
+
+    const link = document.createElement('a');
+    link.href = audioUrl;
+    link.download = audioFile.name || 'meeting-recording.webm';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+
+  async function startBrowserRecording() {
+    if (!recorderSupported) {
+      setRecordingError('이 브라우저에서는 녹음을 지원하지 않습니다. Chrome 또는 Edge 최신 버전을 사용하세요.');
+      return;
+    }
+
+    setRecordingError('');
+    setConfirmClearRecording(false);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = preferredAudioMimeType();
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      setAudioFile(null);
+      recordingChunksRef.current = [];
+      mediaStreamRef.current = stream;
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (event) => {
+        if (event.data?.size > 0) recordingChunksRef.current.push(event.data);
+      };
+      recorder.onstop = () => {
+        const finalMimeType = recorder.mimeType || mimeType || 'audio/webm';
+        const blob = new Blob(recordingChunksRef.current, { type: finalMimeType });
+        const extension = recordingFileExtension(finalMimeType);
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const file = new File([blob], `meeting-recording-${timestamp}.${extension}`, { type: finalMimeType });
+        setAudioFile(file);
+        stream.getTracks().forEach((track) => track.stop());
+        mediaStreamRef.current = null;
+        mediaRecorderRef.current = null;
+      };
+
+      setRecordingSeconds(0);
+      setIsRecording(true);
+      setIsRecordingPaused(false);
+      recordingTimerRef.current = window.setInterval(() => {
+        setRecordingSeconds((seconds) => seconds + 1);
+      }, 1000);
+      recorder.start(1000);
+    } catch (err) {
+      setRecordingError(err?.message || '마이크 권한을 얻지 못했습니다. 브라우저 권한 설정을 확인하세요.');
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+      mediaRecorderRef.current = null;
+    }
+  }
+
+  function pauseOrResumeBrowserRecording() {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder) return;
+
+    if (recorder.state === 'recording') {
+      recorder.pause();
+      setIsRecordingPaused(true);
+      if (recordingTimerRef.current) {
+        window.clearInterval(recordingTimerRef.current);
+        recordingTimerRef.current = null;
+      }
+      return;
+    }
+
+    if (recorder.state === 'paused') {
+      recorder.resume();
+      setIsRecordingPaused(false);
+      recordingTimerRef.current = window.setInterval(() => {
+        setRecordingSeconds((seconds) => seconds + 1);
+      }, 1000);
+    }
+  }
+
+  function stopBrowserRecording() {
+    if (recordingTimerRef.current) {
+      window.clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+    setIsRecording(false);
+    setIsRecordingPaused(false);
+    if (mediaRecorderRef.current?.state === 'recording' || mediaRecorderRef.current?.state === 'paused') {
+      mediaRecorderRef.current.stop();
+      return;
+    }
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+  }
+
+  function clearRecordedAudio() {
+    if (isRecording) stopBrowserRecording();
+    setAudioFile(null);
+    setRecordingSeconds(0);
+    setRecordingError('');
+    setIsRecordingPaused(false);
+    setConfirmClearRecording(false);
+  }
+
   function defaultMeetingOrganizations(user = authUser) {
     return user?.display_name ? [user.display_name] : [];
   }
@@ -272,6 +418,9 @@ function App() {
   useEffect(() => {
     return () => {
       if (pollRef.current) window.clearInterval(pollRef.current);
+      if (recordingTimerRef.current) window.clearInterval(recordingTimerRef.current);
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') mediaRecorderRef.current.stop();
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     };
   }, []);
 
@@ -286,6 +435,18 @@ function App() {
       if (loungeAudioUrl) URL.revokeObjectURL(loungeAudioUrl);
     };
   }, [loungeAudioUrl]);
+
+  useEffect(() => {
+    if (!isRecording || isRecordingPaused) {
+      setRecordingBars(Array(RECORD_BAR_COUNT).fill(6));
+      return undefined;
+    }
+
+    const intervalId = window.setInterval(() => {
+      setRecordingBars(Array.from({ length: RECORD_BAR_COUNT }, () => 6 + Math.round(Math.random() * Math.random() * 34)));
+    }, 110);
+    return () => window.clearInterval(intervalId);
+  }, [isRecording, isRecordingPaused]);
 
   useEffect(() => {
     if (!logBodyRef.current) return;
@@ -308,7 +469,7 @@ function App() {
 
   useEffect(() => {
     if (!authToken) return;
-    if (currentView === 'home' || currentView === 'create' || currentView === 'settings') {
+    if (currentView === 'home' || currentView === 'record' || currentView === 'create' || currentView === 'settings') {
       loadMembers();
     }
     if (currentView === 'create' || currentView === 'settings') {
@@ -1214,7 +1375,8 @@ function App() {
         </div>
         <nav className="side-nav">
           <button className={`side-item ${currentView === 'home' ? 'active' : ''}`} onClick={() => setCurrentView('home')}><Home size={17} /><span className="side-name">Meet Home</span></button>
-          <button className={`side-item ${currentView === 'create' || currentView === 'report' ? 'active' : ''}`} onClick={() => setCurrentView(reportCompleted ? 'report' : 'create')}><Mic2 size={17} /><span className="side-name">회의록 생성</span></button>
+          <button className={`side-item ${currentView === 'record' ? 'active' : ''}`} onClick={() => setCurrentView('record')}><Mic2 size={17} /><span className="side-name">회의 녹음</span></button>
+          <button className={`side-item ${currentView === 'create' || currentView === 'report' ? 'active' : ''}`} onClick={() => setCurrentView(reportCompleted ? 'report' : 'create')}><FileText size={17} /><span className="side-name">회의록 생성</span></button>
           <button className={`side-item ${currentView === 'lounge' ? 'active' : ''}`} onClick={() => setCurrentView('lounge')}><FileText size={17} /><span className="side-name">회의록 라운지</span></button>
           <button className={`side-item ${currentView === 'settings' ? 'active' : ''}`} onClick={() => { setSettingsTab('members'); setCurrentView('settings'); }}><Settings size={17} /><span className="side-name">설정</span></button>
           <div className={`side-subnav ${currentView === 'settings' ? 'open' : ''}`}>
@@ -1330,6 +1492,112 @@ function App() {
                     {homeStats.recentReports.length === 0 && <div className="home-empty">최근 회의록이 없습니다.</div>}
                   </div>
                 </section>
+              </div>
+            </section>
+          )}
+
+          {currentView === 'record' && (
+            <section className="record-page">
+              <div className="record-head">
+                <div>
+                  <span>Browser Recorder</span>
+                  <h2>회의 녹음</h2>
+                  <p>현재 접속한 컴퓨터의 마이크로 회의를 녹음하고, 녹음 파일을 회의록 생성에 바로 사용할 수 있습니다.</p>
+                </div>
+              </div>
+
+              <div className="record-panel">
+                <div className={`record-widget ${recordingStatus === 'recording' ? 'active' : ''}`}>
+                  <div className="record-accent" />
+                  <div className="record-widget-body">
+                    <div className="record-widget-status">
+                      <div className="record-status-label">
+                        <span className={`record-status-dot ${recordingStatus}`}>
+                          {recordingStatus === 'recording' && <span></span>}
+                        </span>
+                        <b>{recordingStatusLabel}</b>
+                      </div>
+                      {recordingStatus === 'stopped' && <span className="record-saved-badge">저장됨</span>}
+                    </div>
+
+                    <div className="record-timer">
+                      <span>{formatRecordingDuration(recordingSeconds).minutes}</span>
+                      <em>:</em>
+                      <span>{formatRecordingDuration(recordingSeconds).seconds}</span>
+                    </div>
+
+                    <div className={`record-waveform ${recordingStatus === 'recording' ? 'active' : ''}`}>
+                      {recordingBars.map((height, index) => (
+                        <i key={index} style={{ height: recordingStatus === 'recording' ? `${height}px` : '6px', opacity: recordingStatus === 'recording' ? 0.55 + (height / 40) * 0.45 : 1 }} />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="record-actions refined">
+                  {recordingStatus === 'idle' && (
+                    <button className="primary-btn" type="button" onClick={startBrowserRecording} disabled={!recorderSupported}>
+                      <Mic2 size={17} />녹음 시작
+                    </button>
+                  )}
+
+                  {(recordingStatus === 'recording' || recordingStatus === 'paused') && (
+                    <>
+                      <button className="line-btn" type="button" onClick={pauseOrResumeBrowserRecording}>
+                        {recordingStatus === 'recording' ? <Pause size={17} /> : <Play size={17} />}
+                        {recordingStatus === 'recording' ? '일시정지' : '재개'}
+                      </button>
+                      <button className="primary-btn danger" type="button" onClick={stopBrowserRecording}>
+                        <Square size={15} fill="currentColor" />녹음 종료
+                      </button>
+                    </>
+                  )}
+
+                  {recordingStatus === 'stopped' && (
+                    <button className="primary-btn" type="button" onClick={startBrowserRecording}>
+                      <Mic2 size={17} />새로 녹음
+                    </button>
+                  )}
+
+                  <button className="line-btn muted" type="button" onClick={() => setConfirmClearRecording(true)} disabled={!recordingHasContent}>
+                    <Trash2 size={16} />비우기
+                  </button>
+                </div>
+
+                {confirmClearRecording && (
+                  <div className="record-clear-confirm">
+                    <AlertTriangle size={16} />
+                    <div>
+                      <b>녹음 파일을 비우시겠어요?</b>
+                      <p>이 작업은 되돌릴 수 없습니다.</p>
+                      <div>
+                        <button className="primary-btn danger compact" type="button" onClick={clearRecordedAudio}>비우기</button>
+                        <button className="line-btn compact" type="button" onClick={() => setConfirmClearRecording(false)}>취소</button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {recordingError && <div className="error-box">{recordingError}</div>}
+                {!recorderSupported && <div className="error-box">현재 브라우저가 마이크 녹음을 지원하지 않습니다.</div>}
+
+                {audioFile && (
+                  <div className="record-preview">
+                    <div>
+                      <span>녹음 파일</span>
+                      <b>{audioFile.name}</b>
+                    </div>
+                    <audio src={audioUrl} controls preload="metadata" />
+                    <div className="record-preview-actions">
+                      <button className="primary-btn" type="button" onClick={() => setCurrentView('create')}>
+                        <FileText size={16} />회의록 생성으로 이동
+                      </button>
+                      <button className="line-btn" type="button" onClick={downloadRecordedAudio}>
+                        <Download size={16} />다운로드
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </section>
           )}

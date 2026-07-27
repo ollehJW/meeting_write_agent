@@ -604,3 +604,91 @@ a { color: inherit; text-decoration: none; }
   .process-guide-head { padding: 18px; }
   .process-guide-body { padding: 18px; }
 }
+
+.primary-btn.danger { background: #b42318; box-shadow: 0 10px 22px rgba(180, 35, 24, .18); }
+.primary-btn.danger:hover { background: #8f1d14; }
+.record-page { background: #fff; border: 1px solid rgba(224,229,239,.8); box-shadow: var(--shadow-soft); min-height: calc(100vh - 96px); }
+.record-head { padding: 28px 30px 24px; background: linear-gradient(120deg, #071836, #0b2d8e); color: #fff; position: relative; overflow: hidden; }
+.record-head::after { content: ""; position: absolute; right: -86px; bottom: -122px; width: 300px; height: 300px; border-radius: 50%; border: 40px solid rgba(76, 184, 255, .16); }
+.record-head > div { position: relative; z-index: 1; }
+.record-head span { display: block; color: #4bd2e5; font-size: 12px; font-weight: 950; letter-spacing: .04em; margin-bottom: 9px; }
+.record-head h2 { margin: 0 0 8px; font-size: 30px; font-weight: 950; color: #fff; }
+.record-head p { margin: 0; color: rgba(255,255,255,.78); font-size: 13px; line-height: 1.55; max-width: 680px; }
+.record-panel { padding: 28px 30px 32px; display: grid; gap: 18px; max-width: 920px; }
+.record-status { border: 1px solid #dfe6f1; background: #fbfcff; min-height: 150px; display: flex; align-items: center; gap: 18px; padding: 24px; }
+.record-dot { width: 18px; height: 18px; border-radius: 50%; background: #9aa6b8; box-shadow: 0 0 0 8px rgba(154, 166, 184, .12); flex: 0 0 auto; }
+.record-dot.active { background: #e60012; box-shadow: 0 0 0 8px rgba(230, 0, 18, .12); animation: recordPulse 1.1s ease-in-out infinite; }
+.record-status b { display: block; color: #202a3a; font-size: 17px; font-weight: 950; margin-bottom: 8px; }
+.record-status strong { display: block; color: var(--wia-blue); font-size: 44px; line-height: 1; font-weight: 950; font-variant-numeric: tabular-nums; }
+.record-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.record-preview { border: 1px solid #dfe6f1; background: #fff; padding: 18px; display: grid; gap: 14px; }
+.record-preview > div span { display: block; color: var(--wia-blue); font-size: 11px; font-weight: 950; letter-spacing: .04em; margin-bottom: 6px; }
+.record-preview > div b { display: block; color: #202a3a; font-size: 14px; word-break: keep-all; overflow-wrap: anywhere; }
+.record-preview audio { width: 100%; }
+.record-preview .primary-btn { width: fit-content; }
+@keyframes recordPulse {
+  0%, 100% { box-shadow: 0 0 0 8px rgba(230, 0, 18, .12); }
+  50% { box-shadow: 0 0 0 14px rgba(230, 0, 18, .04); }
+}
+
+@media (max-width: 640px) {
+  .record-head { padding: 24px 18px; }
+  .record-panel { padding: 20px 18px 28px; }
+  .record-status { min-height: 132px; padding: 18px; }
+  .record-status strong { font-size: 36px; }
+  .record-actions .primary-btn, .record-actions .line-btn, .record-preview .primary-btn { width: 100%; }
+}
+.record-preview-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.record-preview-actions .primary-btn, .record-preview-actions .line-btn { width: fit-content; }
+@media (max-width: 640px) {
+  .record-preview-actions .primary-btn, .record-preview-actions .line-btn { width: 100%; }
+}
+
+.record-panel { max-width: 680px; margin: 0 auto; width: 100%; padding: 36px 30px 42px; display: grid; gap: 16px; }
+.record-widget { overflow: hidden; border: 1px solid #dbe2ef; background: radial-gradient(circle at 84% 18%, rgba(238,242,252,.9) 0, rgba(238,242,252,0) 34%), #fff; box-shadow: 0 18px 48px -28px rgba(15,27,61,.42), 0 2px 10px rgba(15,27,61,.06); transition: background 300ms ease, border-color 300ms ease, box-shadow 300ms ease; }
+.record-widget.active { border-color: #f0c6c9; background: radial-gradient(circle at 84% 18%, rgba(229,72,77,.11) 0, rgba(229,72,77,0) 36%), linear-gradient(180deg, #fff 0%, #fff8f8 100%); box-shadow: 0 22px 56px -30px rgba(229,72,77,.38), 0 2px 10px rgba(15,27,61,.06); }
+.record-accent { height: 5px; background: linear-gradient(90deg, #0f1b3d 0%, #234084 58%, #e5484d 100%); }
+.record-widget-body { padding: 30px 34px 34px; }
+.record-widget-status { min-height: 28px; display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 24px; }
+.record-status-label { display: inline-flex; align-items: center; gap: 10px; min-width: 0; }
+.record-status-label b { color: #0f1b3d; font-size: 14px; font-weight: 900; line-height: 1.2; }
+.record-status-dot { position: relative; width: 12px; height: 12px; border-radius: 50%; background: #94a3b8; flex: 0 0 auto; box-shadow: 0 0 0 6px rgba(148,163,184,.12); }
+.record-status-dot.recording { background: #e5484d; box-shadow: 0 0 0 6px rgba(229,72,77,.13); }
+.record-status-dot.paused { background: #f5a524; box-shadow: 0 0 0 6px rgba(245,165,36,.14); }
+.record-status-dot.stopped { background: #0f1b3d; box-shadow: 0 0 0 6px rgba(15,27,61,.1); }
+.record-status-dot span { position: absolute; inset: 0; border-radius: 50%; background: #e5484d; opacity: .6; animation: recordPing 1.2s cubic-bezier(0, 0, .2, 1) infinite; }
+.record-saved-badge { color: #0f1b3d; background: #eef2fc; padding: 6px 10px; font-size: 11px; font-weight: 800; line-height: 1; white-space: nowrap; }
+.record-timer { display: flex; align-items: baseline; justify-content: center; gap: 5px; margin-bottom: 30px; }
+.record-timer span { color: #0f1b3d; font-size: 70px; line-height: .92; font-weight: 950; font-variant-numeric: tabular-nums; letter-spacing: 0; }
+.record-timer em { color: #b9c1d9; font-size: 66px; line-height: .92; font-style: normal; font-weight: 950; }
+.record-waveform { height: 76px; background: #f5f7fc; display: flex; align-items: center; gap: 4px; padding: 0 22px; transition: background 300ms ease; }
+.record-waveform.active { background: #fbf0f0; }
+.record-waveform i { flex: 1; min-width: 3px; border-radius: 999px; background: #cbd3e5; transition: height 100ms ease, background 300ms ease, opacity 100ms ease; }
+.record-waveform.active i { background: #0f1b3d; }
+.record-actions.refined { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
+.record-actions.refined .primary-btn, .record-actions.refined .line-btn { flex: 1; min-height: 50px; font-size: 14px; }
+.record-actions.refined .line-btn.muted { flex: 0 0 auto; color: #64748b; border-color: #dfe6f1; background: #fff; padding: 0 16px; }
+.record-preview { border: 1px solid #dbe2ef; background: #fff; padding: 18px; display: grid; gap: 14px; box-shadow: 0 12px 34px -28px rgba(15,27,61,.34); }
+.record-preview audio { width: 100%; min-height: 42px; }
+.record-preview-actions { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(150px, .65fr); gap: 10px; }
+.record-preview-actions .primary-btn, .record-preview-actions .line-btn { width: 100%; min-height: 46px; }
+.primary-btn.compact, .line-btn.compact { min-height: 30px; padding: 0 11px; font-size: 12px; }
+.record-clear-confirm { border: 1px solid #f3d2d2; background: #fdf4f4; padding: 15px 16px; display: flex; align-items: flex-start; gap: 12px; box-shadow: 0 12px 30px -24px rgba(229,72,77,.34); }
+.record-clear-confirm > svg { color: #e5484d; margin-top: 2px; flex: 0 0 auto; }
+.record-clear-confirm b { display: block; color: #0f1b3d; font-size: 13px; font-weight: 850; margin-bottom: 3px; }
+.record-clear-confirm p { margin: 0; color: #64748b; font-size: 12px; line-height: 1.45; }
+.record-clear-confirm div div { display: flex; gap: 8px; margin-top: 10px; }
+@keyframes recordPing {
+  75%, 100% { transform: scale(2.2); opacity: 0; }
+}
+
+@media (max-width: 640px) {
+  .record-panel { max-width: none; padding: 20px 18px 28px; }
+  .record-widget-body { padding: 24px 20px 26px; }
+  .record-timer { margin-bottom: 24px; }
+  .record-timer span, .record-timer em { font-size: 50px; }
+  .record-waveform { height: 64px; padding: 0 16px; gap: 3px; }
+  .record-actions.refined { display: grid; grid-template-columns: 1fr; }
+  .record-actions.refined .primary-btn, .record-actions.refined .line-btn { width: 100%; }
+  .record-preview-actions { grid-template-columns: 1fr; }
+}
