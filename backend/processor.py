@@ -1,4 +1,5 @@
 import json
+import gc
 import logging
 import os
 import re
@@ -479,129 +480,156 @@ def run_llm_postprocess(result, output_dir: Path, participant_list, meeting_purp
 
 
 def transcribe_meeting(audio_path: Path, output_dir: Path, progress: ProgressCallback | None = None):
-    output_dir.mkdir(parents=True, exist_ok=True)
-    notify(progress, "loading", 5, "오디오를 로드하고 있습니다.")
+    waveform = None
+    mono_waveform = None
+    audio_input = None
+    diarization = None
+    diarization_pipeline = None
+    stt_model = None
+    segments_for_stt = None
+    stt_results = None
+    batch_results = None
 
-    t = time.time()
-    waveform, sample_rate = torchaudio.load(str(audio_path))
-    audio_length = waveform.shape[1] / sample_rate
-    mono_waveform = waveform.mean(dim=0)
-    audio_loaded_message = f"오디오 로드 완료 — {audio_length:.1f}초 분량 ({elapsed(t)})"
-    log.info(audio_loaded_message)
-    notify(progress, "loading", 8, audio_loaded_message)
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        notify(progress, "loading", 5, "오디오를 로드하고 있습니다.")
 
-    notify(progress, "diarization", 12, "화자 분리 모델을 로드하고 있습니다.")
-    if not HF_TOKEN:
-        raise RuntimeError("HF_TOKEN or HUGGINGFACE_HUB_TOKEN is required for pyannote diarization.")
-    t = time.time()
-    diarization_pipeline = Pipeline.from_pretrained(
-        DIARIZATION_MODEL_ID,
-        token=HF_TOKEN,
-    )
-    diarization_pipeline.to(DEVICE)
-    log.info("pyannote 파이프라인 로드 완료 (%s)", elapsed(t))
+        t = time.time()
+        waveform, sample_rate = torchaudio.load(str(audio_path))
+        audio_length = waveform.shape[1] / sample_rate
+        mono_waveform = waveform.mean(dim=0)
+        audio_loaded_message = f"오디오 로드 완료 — {audio_length:.1f}초 분량 ({elapsed(t)})"
+        log.info(audio_loaded_message)
+        notify(progress, "loading", 8, audio_loaded_message)
 
-    notify(progress, "diarization", 20, "화자 분리를 실행하고 있습니다.")
-    t = time.time()
-    audio_input = {"waveform": waveform, "sample_rate": sample_rate}
-    diarization = diarization_pipeline(audio_input)
-    speaker_segments = [
-        {"start": turn.start, "end": turn.end, "speaker": speaker}
-        for turn, _, speaker in diarization.speaker_diarization.itertracks(yield_label=True)
-    ]
-    speaker_ids = sorted({s["speaker"] for s in speaker_segments})
-    speaker_map = {s: i for i, s in enumerate(speaker_ids)}
-    (
-        first_merged_segments,
-        filtered_segments,
-        second_merged_segments,
-        overlap_fixed_segments,
-        final_filtered_segments,
-        merged_speaker_segments,
-    ) = preprocess_speaker_segments(
-        speaker_segments,
-        MAX_MERGE_SILENCE_S,
-        MIN_SEGMENT_DURATION_S,
-    )
-    diarization_done_message = (
-        f"화자 분리 완료 — {len(speaker_ids)}명 감지, "
-        f"원본 {len(speaker_segments)}개 → 1차 병합 {len(first_merged_segments)}개 → "
-        f"1.5초 미만 제거 {len(filtered_segments)}개 → 2차 병합 {len(second_merged_segments)}개 → "
-        f"겹침 보정 {len(overlap_fixed_segments)}개 → 1.5초 미만 재제거 {len(final_filtered_segments)}개 → "
-        f"최종 병합 {len(merged_speaker_segments)}개 ({elapsed(t)})"
-    )
-    log.info(diarization_done_message)
-    notify(progress, "diarization", 30, diarization_done_message)
-
-    notify(progress, "stt", 35, "Qwen3-ASR 모델을 로드하고 있습니다.")
-    t = time.time()
-    stt_model = Qwen3ASRModel.from_pretrained(
-        STT_MODEL_PATH,
-        dtype=TORCH_DTYPE,
-        device_map=DEVICE_MAP,
-        max_inference_batch_size=STT_BATCH_SIZE,
-        max_new_tokens=512,
-    )
-    for candidate in (stt_model, getattr(stt_model, "model", None)):
-        generation_config = getattr(candidate, "generation_config", None)
-        if generation_config is not None and getattr(generation_config, "pad_token_id", None) is None:
-            eos_token_id = getattr(generation_config, "eos_token_id", None)
-            generation_config.pad_token_id = eos_token_id[0] if isinstance(eos_token_id, list) else eos_token_id
-    log.info("Qwen3-ASR 모델 로드 완료 (%s)", elapsed(t))
-
-    notify(progress, "stt", 45, "병합된 화자 구간별 STT를 실행하고 있습니다.")
-    stt_speaker_segments = split_long_speaker_segments(merged_speaker_segments, MAX_STT_SEGMENT_DURATION_S, mono_waveform, sample_rate)
-    if len(stt_speaker_segments) != len(merged_speaker_segments):
-        log.info(
-            "STT 입력 구간 분할 — %s개 → %s개, 최대 %.1f초",
-            len(merged_speaker_segments),
-            len(stt_speaker_segments),
-            MAX_STT_SEGMENT_DURATION_S,
+        notify(progress, "diarization", 12, "화자 분리 모델을 로드하고 있습니다.")
+        if not HF_TOKEN:
+            raise RuntimeError("HF_TOKEN or HUGGINGFACE_HUB_TOKEN is required for pyannote diarization.")
+        t = time.time()
+        diarization_pipeline = Pipeline.from_pretrained(
+            DIARIZATION_MODEL_ID,
+            token=HF_TOKEN,
         )
-    segments_for_stt = []
-    for segment in stt_speaker_segments:
-        audio = build_segment_audio(segment, mono_waveform, sample_rate)
-        if audio is None:
-            continue
-        segments_for_stt.append((segment, audio))
+        diarization_pipeline.to(DEVICE)
+        log.info("pyannote 파이프라인 로드 완료 (%s)", elapsed(t))
 
-    stt_results = []
-    total_batches = max(1, (len(segments_for_stt) + STT_BATCH_SIZE - 1) // STT_BATCH_SIZE)
-    for batch_index, batch_start in enumerate(range(0, len(segments_for_stt), STT_BATCH_SIZE), start=1):
-        batch = segments_for_stt[batch_start:batch_start + STT_BATCH_SIZE]
-        start_percent = 45 + int(45 * (batch_index - 1) / total_batches)
-        notify(progress, "stt", start_percent, f"STT 배치 실행 중: {batch_index}/{total_batches} 배치")
-        batch_results = stt_model.transcribe(
-            audio=[audio for _, audio in batch],
-            language=["Korean"] * len(batch),
+        notify(progress, "diarization", 20, "화자 분리를 실행하고 있습니다.")
+        t = time.time()
+        audio_input = {"waveform": waveform, "sample_rate": sample_rate}
+        diarization = diarization_pipeline(audio_input)
+        speaker_segments = [
+            {"start": turn.start, "end": turn.end, "speaker": speaker}
+            for turn, _, speaker in diarization.speaker_diarization.itertracks(yield_label=True)
+        ]
+        speaker_ids = sorted({s["speaker"] for s in speaker_segments})
+        speaker_map = {s: i for i, s in enumerate(speaker_ids)}
+        (
+            first_merged_segments,
+            filtered_segments,
+            second_merged_segments,
+            overlap_fixed_segments,
+            final_filtered_segments,
+            merged_speaker_segments,
+        ) = preprocess_speaker_segments(
+            speaker_segments,
+            MAX_MERGE_SILENCE_S,
+            MIN_SEGMENT_DURATION_S,
         )
-        stt_results.extend(batch_results)
-        percent = 45 + int(45 * batch_index / total_batches)
-        notify(progress, "stt", percent, f"STT 배치 완료: {batch_index}/{total_batches} 배치")
+        diarization_done_message = (
+            f"화자 분리 완료 — {len(speaker_ids)}명 감지, "
+            f"원본 {len(speaker_segments)}개 → 1차 병합 {len(first_merged_segments)}개 → "
+            f"1.5초 미만 제거 {len(filtered_segments)}개 → 2차 병합 {len(second_merged_segments)}개 → "
+            f"겹침 보정 {len(overlap_fixed_segments)}개 → 1.5초 미만 재제거 {len(final_filtered_segments)}개 → "
+            f"최종 병합 {len(merged_speaker_segments)}개 ({elapsed(t)})"
+        )
+        log.info(diarization_done_message)
+        notify(progress, "diarization", 30, diarization_done_message)
 
-    sentences = []
-    for segment, result in zip((item[0] for item in segments_for_stt), stt_results):
-        content = get_transcript_text(result)
-        if not content:
-            continue
+        notify(progress, "stt", 35, "Qwen3-ASR 모델을 로드하고 있습니다.")
+        t = time.time()
+        stt_model = Qwen3ASRModel.from_pretrained(
+            STT_MODEL_PATH,
+            dtype=TORCH_DTYPE,
+            device_map=DEVICE_MAP,
+            max_inference_batch_size=STT_BATCH_SIZE,
+            max_new_tokens=512,
+        )
+        for candidate in (stt_model, getattr(stt_model, "model", None)):
+            generation_config = getattr(candidate, "generation_config", None)
+            if generation_config is not None and getattr(generation_config, "pad_token_id", None) is None:
+                eos_token_id = getattr(generation_config, "eos_token_id", None)
+                generation_config.pad_token_id = eos_token_id[0] if isinstance(eos_token_id, list) else eos_token_id
+        log.info("Qwen3-ASR 모델 로드 완료 (%s)", elapsed(t))
 
-        sentences.append({
-            "index": len(sentences) + 1,
-            "speaker": speaker_map[segment["speaker"]],
-            "content": content,
-            "start": segment["start"],
-            "end": segment["end"],
-        })
+        notify(progress, "stt", 45, "병합된 화자 구간별 STT를 실행하고 있습니다.")
+        stt_speaker_segments = split_long_speaker_segments(merged_speaker_segments, MAX_STT_SEGMENT_DURATION_S, mono_waveform, sample_rate)
+        if len(stt_speaker_segments) != len(merged_speaker_segments):
+            log.info(
+                "STT 입력 구간 분할 — %s개 → %s개, 최대 %.1f초",
+                len(merged_speaker_segments),
+                len(stt_speaker_segments),
+                MAX_STT_SEGMENT_DURATION_S,
+            )
+        segments_for_stt = []
+        for segment in stt_speaker_segments:
+            audio = build_segment_audio(segment, mono_waveform, sample_rate)
+            if audio is None:
+                continue
+            segments_for_stt.append((segment, audio))
 
-    stt_sentences = format_transcript_sentences(sentences)
-    output = {
-        "audio_length": round(audio_length, 1),
-        "total_speakers": len(speaker_ids),
-        "sentences": stt_sentences,
-    }
+        stt_results = []
+        total_batches = max(1, (len(segments_for_stt) + STT_BATCH_SIZE - 1) // STT_BATCH_SIZE)
+        for batch_index, batch_start in enumerate(range(0, len(segments_for_stt), STT_BATCH_SIZE), start=1):
+            batch = segments_for_stt[batch_start:batch_start + STT_BATCH_SIZE]
+            start_percent = 45 + int(45 * (batch_index - 1) / total_batches)
+            notify(progress, "stt", start_percent, f"STT 배치 실행 중: {batch_index}/{total_batches} 배치")
+            batch_results = stt_model.transcribe(
+                audio=[audio for _, audio in batch],
+                language=["Korean"] * len(batch),
+            )
+            stt_results.extend(batch_results)
+            percent = 45 + int(45 * batch_index / total_batches)
+            notify(progress, "stt", percent, f"STT 배치 완료: {batch_index}/{total_batches} 배치")
 
-    notify(progress, "stt_completed", 88, "화자 분리와 STT가 완료되었습니다.")
-    return output
+        sentences = []
+        for segment, result in zip((item[0] for item in segments_for_stt), stt_results):
+            content = get_transcript_text(result)
+            if not content:
+                continue
+
+            sentences.append({
+                "index": len(sentences) + 1,
+                "speaker": speaker_map[segment["speaker"]],
+                "content": content,
+                "start": segment["start"],
+                "end": segment["end"],
+            })
+
+        stt_sentences = format_transcript_sentences(sentences)
+        output = {
+            "audio_length": round(audio_length, 1),
+            "total_speakers": len(speaker_ids),
+            "sentences": stt_sentences,
+        }
+
+        notify(progress, "stt_completed", 88, "화자 분리와 STT가 완료되었습니다.")
+        return output
+
+    finally:
+        batch_results = None
+        stt_results = None
+        segments_for_stt = None
+        diarization = None
+        audio_input = None
+        mono_waveform = None
+        waveform = None
+        stt_model = None
+        diarization_pipeline = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            log.info("CUDA cache released after meeting transcription")
 
 
 def apply_speaker_mapping(result: dict, speaker_mapping: dict[str, str], output_dir: Path, match_details=None):

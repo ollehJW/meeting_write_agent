@@ -55,6 +55,5 @@ def chat_completion(prompt, temperature=0):
     response = get_llm_client().chat.completions.create(
         model=OPENAI_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
     )
     return response.choices[0].message.content.strip()
