@@ -1,0 +1,1 @@
+systemctl --user restart meeting-write-backend.service meeting-write-frontend.service
