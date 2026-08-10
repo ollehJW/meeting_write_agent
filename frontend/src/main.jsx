@@ -75,9 +75,25 @@ const USER_GUIDE_MARKDOWN = `# 사용 가이드
 - 필요 시 회의록 본문이나 참고자료를 다운로드해 공유합니다.
 `;
 
+function normalizeSpeakerId(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return '';
+  const numericValue = Number(text);
+  return Number.isFinite(numericValue) && text !== '' ? String(numericValue) : text;
+}
+
 function speakerIdsFromResult(result) {
-  const ids = new Set((result?.sentences || []).map((sentence) => sentence.speaker));
-  return Array.from(ids).sort((a, b) => Number(a) - Number(b));
+  const ids = new Set(
+    (result?.sentences || [])
+      .map((sentence) => normalizeSpeakerId(sentence.speaker_id ?? sentence.speaker))
+      .filter(Boolean),
+  );
+  return Array.from(ids).sort((a, b) => {
+    const numberA = Number(a);
+    const numberB = Number(b);
+    if (Number.isFinite(numberA) && Number.isFinite(numberB)) return numberA - numberB;
+    return a.localeCompare(b);
+  });
 }
 
 function matchBySpeaker(matchesData, speakerId) {
@@ -160,10 +176,13 @@ function App() {
   const [recordingBars, setRecordingBars] = useState(() => Array(RECORD_BAR_COUNT).fill(6));
   const [confirmClearRecording, setConfirmClearRecording] = useState(false);
   const [referenceFiles, setReferenceFiles] = useState([]);
+  const emptyTimeParts = { period: 'AM', hour: '', minute: '00' };
   const [meetingTitle, setMeetingTitle] = useState('');
   const [meetingDate, setMeetingDate] = useState('');
   const [meetingStartTime, setMeetingStartTime] = useState('');
   const [meetingEndTime, setMeetingEndTime] = useState('');
+  const [meetingStartTimeParts, setMeetingStartTimeParts] = useState(emptyTimeParts);
+  const [meetingEndTimeParts, setMeetingEndTimeParts] = useState(emptyTimeParts);
   const [meetingOrganizations, setMeetingOrganizations] = useState(() => defaultMeetingOrganizations());
   const [organizationInput, setOrganizationInput] = useState('');
   const [participants, setParticipants] = useState([]);
@@ -218,7 +237,7 @@ function App() {
   const filteredSentences = useMemo(() => {
     const sentences = result?.sentences || [];
     if (selectedSpeakerFilter === 'all') return sentences;
-    return sentences.filter((sentence) => String(sentence.speaker) === selectedSpeakerFilter);
+    return sentences.filter((sentence) => normalizeSpeakerId(sentence.speaker_id ?? sentence.speaker) === selectedSpeakerFilter);
   }, [result, selectedSpeakerFilter]);
   const audioUrl = useMemo(() => (audioFile ? URL.createObjectURL(audioFile) : ''), [audioFile]);
   const recorderSupported = typeof window !== 'undefined' && Boolean(window.MediaRecorder && navigator.mediaDevices?.getUserMedia);
@@ -464,6 +483,17 @@ function App() {
     setConfirmClearRecording(false);
   }
 
+  function openRecorderFromMeetingForm() {
+    setConfirmClearRecording(false);
+    setRecordingError('');
+    setCurrentView('record');
+  }
+
+  function useRecordedAudioForMeetingForm() {
+    setConfirmClearRecording(false);
+    setCurrentView('create');
+  }
+
   function defaultMeetingOrganizations(user = authUser) {
     return user?.display_name ? [user.display_name] : [];
   }
@@ -477,6 +507,8 @@ function App() {
     setMeetingDate('');
     setMeetingStartTime('');
     setMeetingEndTime('');
+    setMeetingStartTimeParts(emptyTimeParts);
+    setMeetingEndTimeParts(emptyTimeParts);
     setMeetingOrganizations(defaultMeetingOrganizations(user));
     setOrganizationInput('');
     setParticipants([]);
@@ -498,11 +530,6 @@ function App() {
     };
   }, [audioUrl]);
 
-  useEffect(() => {
-    return () => {
-      if (loungeAudioUrl) URL.revokeObjectURL(loungeAudioUrl);
-    };
-  }, [loungeAudioUrl]);
 
   useEffect(() => {
     if (!isRecording || isRecordingPaused) {
@@ -570,10 +597,7 @@ function App() {
     setIsLoadingLoungeDetail(true);
     setIsLoadingLoungeAudio(false);
     setLoungeError('');
-    if (loungeAudioUrl) {
-      URL.revokeObjectURL(loungeAudioUrl);
-      setLoungeAudioUrl('');
-    }
+    setLoungeAudioUrl('');
 
     try {
       const response = await fetch(API_BASE + '/api/reports/' + report.job_id, { headers: authHeaders() });
@@ -587,16 +611,7 @@ function App() {
       setIsLoadingLoungeDetail(false);
 
       if (detail.has_audio) {
-        setIsLoadingLoungeAudio(true);
-        const audioResponse = await fetch(API_BASE + '/api/reports/' + report.job_id + '/audio', { headers: authHeaders() });
-        if (audioResponse.status === 401) {
-          handleExpiredSession();
-          return;
-        }
-        if (audioResponse.ok) {
-          const audioBlob = await audioResponse.blob();
-          setLoungeAudioUrl(URL.createObjectURL(audioBlob));
-        }
+        setLoungeAudioUrl(authenticatedUrl('/api/reports/' + report.job_id + '/audio'));
       }
     } catch (err) {
       setLoungeError(err.message);
@@ -611,10 +626,7 @@ function App() {
     setLoungeDetail(null);
     setIsLoadingLoungeAudio(false);
     setMeetingInfoOpen(false);
-    if (loungeAudioUrl) {
-      URL.revokeObjectURL(loungeAudioUrl);
-      setLoungeAudioUrl('');
-    }
+    setLoungeAudioUrl('');
   }
 
   async function downloadReferenceZip() {
@@ -707,27 +719,24 @@ function App() {
     setParticipants((prev) => [...prev, trimmed]);
   }
 
+  function addAllTeamMembersToParticipants() {
+    setParticipants((prev) => {
+      const existing = new Set(prev);
+      const nextMembers = members
+        .map((member) => member.member_name.trim())
+        .filter((memberName) => memberName && !existing.has(memberName));
+      return nextMembers.length ? [...prev, ...nextMembers] : prev;
+    });
+  }
+
   function handleListKeyDown(event, addItem) {
     if (event.key !== 'Enter') return;
     event.preventDefault();
     addItem();
   }
 
-  function timeToSelectParts(value) {
-    if (!value) return { period: 'AM', hour: '', minute: '00' };
-    const [hourText, minute = '00'] = value.split(':');
-    const hour24 = Number(hourText);
-    const period = hour24 >= 12 ? 'PM' : 'AM';
-    const hour12 = hour24 % 12 || 12;
-    return { period, hour: String(hour12), minute };
-  }
-
-  function setHalfHourTime(currentValue, setValue, key, nextValue) {
-    const parts = { ...timeToSelectParts(currentValue), [key]: nextValue };
-    if (!parts.hour) {
-      setValue('');
-      return;
-    }
+  function timePartsToValue(parts) {
+    if (!parts.hour) return '';
 
     let hour = Number(parts.hour);
     if (parts.period === 'AM') {
@@ -736,7 +745,13 @@ function App() {
       hour = hour === 12 ? 12 : hour + 12;
     }
 
-    setValue(`${String(hour).padStart(2, '0')}:${parts.minute}`);
+    return String(hour).padStart(2, '0') + ':' + parts.minute;
+  }
+
+  function setHalfHourTime(parts, setParts, setValue, key, nextValue) {
+    const nextParts = { ...parts, [key]: nextValue };
+    setParts(nextParts);
+    setValue(timePartsToValue(nextParts));
   }
 
   function parseStartSeconds(timeRange) {
@@ -828,6 +843,11 @@ function App() {
 
   function authHeaders() {
     return { Authorization: `Bearer ${authToken}` };
+  }
+
+  function authenticatedUrl(path) {
+    const separator = path.includes('?') ? '&' : '?';
+    return `${API_BASE}${path}${separator}token=${encodeURIComponent(authToken)}`;
   }
 
   function handleExpiredSession() {
@@ -1658,7 +1678,7 @@ function App() {
                     </div>
                     <audio src={audioUrl} controls preload="metadata" />
                     <div className="record-preview-actions">
-                      <button className="primary-btn" type="button" onClick={() => setCurrentView('create')}>
+                      <button className="primary-btn" type="button" onClick={useRecordedAudioForMeetingForm}>
                         <FileText size={16} />회의록 생성으로 이동
                       </button>
                       <button className="line-btn" type="button" onClick={downloadRecordedAudio}>
@@ -1732,15 +1752,15 @@ function App() {
                       <label className="field-label"><Clock3 size={14} />시작 시간 <span className="required">필수</span></label>
                       <div className="time-select-row">
                         <select
-                          value={timeToSelectParts(meetingStartTime).period}
-                          onChange={(event) => setHalfHourTime(meetingStartTime, setMeetingStartTime, 'period', event.target.value)}
+                          value={meetingStartTimeParts.period}
+                          onChange={(event) => setHalfHourTime(meetingStartTimeParts, setMeetingStartTimeParts, setMeetingStartTime, 'period', event.target.value)}
                         >
                           <option value="AM">오전</option>
                           <option value="PM">오후</option>
                         </select>
                         <select
-                          value={timeToSelectParts(meetingStartTime).hour}
-                          onChange={(event) => setHalfHourTime(meetingStartTime, setMeetingStartTime, 'hour', event.target.value)}
+                          value={meetingStartTimeParts.hour}
+                          onChange={(event) => setHalfHourTime(meetingStartTimeParts, setMeetingStartTimeParts, setMeetingStartTime, 'hour', event.target.value)}
                         >
                           <option value="" disabled>시</option>
                           {Array.from({ length: 12 }, (_, index) => String(index + 1)).map((hour) => (
@@ -1748,8 +1768,8 @@ function App() {
                           ))}
                         </select>
                         <select
-                          value={timeToSelectParts(meetingStartTime).minute}
-                          onChange={(event) => setHalfHourTime(meetingStartTime, setMeetingStartTime, 'minute', event.target.value)}
+                          value={meetingStartTimeParts.minute}
+                          onChange={(event) => setHalfHourTime(meetingStartTimeParts, setMeetingStartTimeParts, setMeetingStartTime, 'minute', event.target.value)}
                         >
                           <option value="00">00</option>
                           <option value="30">30</option>
@@ -1760,15 +1780,15 @@ function App() {
                       <label className="field-label"><Clock3 size={14} />종료 시간 <span className="required">필수</span></label>
                       <div className="time-select-row">
                         <select
-                          value={timeToSelectParts(meetingEndTime).period}
-                          onChange={(event) => setHalfHourTime(meetingEndTime, setMeetingEndTime, 'period', event.target.value)}
+                          value={meetingEndTimeParts.period}
+                          onChange={(event) => setHalfHourTime(meetingEndTimeParts, setMeetingEndTimeParts, setMeetingEndTime, 'period', event.target.value)}
                         >
                           <option value="AM">오전</option>
                           <option value="PM">오후</option>
                         </select>
                         <select
-                          value={timeToSelectParts(meetingEndTime).hour}
-                          onChange={(event) => setHalfHourTime(meetingEndTime, setMeetingEndTime, 'hour', event.target.value)}
+                          value={meetingEndTimeParts.hour}
+                          onChange={(event) => setHalfHourTime(meetingEndTimeParts, setMeetingEndTimeParts, setMeetingEndTime, 'hour', event.target.value)}
                         >
                           <option value="" disabled>시</option>
                           {Array.from({ length: 12 }, (_, index) => String(index + 1)).map((hour) => (
@@ -1776,8 +1796,8 @@ function App() {
                           ))}
                         </select>
                         <select
-                          value={timeToSelectParts(meetingEndTime).minute}
-                          onChange={(event) => setHalfHourTime(meetingEndTime, setMeetingEndTime, 'minute', event.target.value)}
+                          value={meetingEndTimeParts.minute}
+                          onChange={(event) => setHalfHourTime(meetingEndTimeParts, setMeetingEndTimeParts, setMeetingEndTime, 'minute', event.target.value)}
                         >
                           <option value="00">00</option>
                           <option value="30">30</option>
@@ -1823,7 +1843,17 @@ function App() {
                     <div className="field-group">
                       <div className="participant-header-grid">
                         <label className="field-label">회의 참석자 명단 <span className="required">필수</span></label>
-                        <div className="field-label">우리 팀 간편 추가</div>
+                        <div className="field-label participant-quick-label">
+                          <span>우리 팀 간편 추가</span>
+                          <button
+                            type="button"
+                            className="team-add-all-btn"
+                            onClick={addAllTeamMembersToParticipants}
+                            disabled={!members.some((member) => !participants.includes(member.member_name))}
+                          >
+                            전체 추가
+                          </button>
+                        </div>
                       </div>
                       <div className="participant-list-grid participant-entry-grid">
                         <div className="participant-list-pane">
@@ -1888,6 +1918,15 @@ function App() {
                   </div>
 
                   <div className="upload-row">
+                    <div className="upload-col">
+                      <label className="field-label">회의 녹음</label>
+                      <button className="record-upload-card" type="button" onClick={openRecorderFromMeetingForm}>
+                        <span className="record-upload-icon"><Mic2 size={24} /></span>
+                        <b>회의 녹음</b>
+                        <small>마이크로 바로 녹음</small>
+                      </button>
+                    </div>
+
                     <div className="upload-col">
                       <label className="field-label">회의 녹음 파일 <span className="required">필수</span></label>
                       <label className="upload-box">
@@ -2518,7 +2557,7 @@ function App() {
                   {filteredSentences.map((sentence) => (
                     <div className="sample-line" key={sentence.index}>
                       <div className="sample-speaker-cell">
-                        <span>Speaker {sentence.speaker}</span>
+                        <span>Speaker {normalizeSpeakerId(sentence.speaker_id ?? sentence.speaker)}</span>
                         <small className="time-pill">{sentence.time}</small>
                       </div>
                       <strong>{sentence.content}</strong>

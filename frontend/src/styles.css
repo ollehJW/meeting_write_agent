@@ -184,6 +184,10 @@ a { color: inherit; text-decoration: none; }
 .card-list::-webkit-scrollbar-thumb { background: #cfd8e7; border-radius: 999px; }
 .participant-header-grid, .participant-list-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
 .participant-header-grid { align-items: start; margin-bottom: 7px; }
+.participant-quick-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.team-add-all-btn { border: 1px solid #cfd9e8; background: #fff; color: var(--wia-blue); min-height: 25px; padding: 0 9px; font-size: 11px; font-weight: 900; white-space: nowrap; transition: var(--transition); }
+.team-add-all-btn:hover:not(:disabled) { border-color: var(--wia-blue); background: #f3f7ff; }
+.team-add-all-btn:disabled { cursor: not-allowed; color: #98a4b5; background: #f3f6fa; border-color: #e1e7f0; }
 .participant-list-grid { margin-top: 0; }
 .participant-list-pane { min-width: 0; display: grid; gap: 6px; }
 .participant-pane-title { color: #354154; font-size: 11.5px; font-weight: 900; }
@@ -210,7 +214,7 @@ a { color: inherit; text-decoration: none; }
 .list-card-row button:hover { color: #b31220; background: #fff0f1; }
 .empty-list-row { min-height: 36px; display: grid; align-items: center; color: #8a96a8; font-size: 12px; padding: 0 9px; border: 1px dashed #d8e0ec; background: #fff; }
 .required { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 999px; background: #fff0f1; color: #b31220; font-size: 9.5px; font-weight: 950; margin-left: 6px; }
-.upload-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: stretch; }
+.upload-row { display: grid; grid-template-columns: minmax(150px, .5fr) minmax(0, 1.25fr) minmax(0, 1.25fr); gap: 14px; align-items: stretch; }
 .upload-col { min-width: 0; display: grid; align-content: start; }
 .upload-row .upload-box { min-height: 150px; height: 150px; }
 .upload-box-disabled { cursor: not-allowed; opacity: .72; background: #f4f6fa; }
@@ -219,6 +223,11 @@ a { color: inherit; text-decoration: none; }
 .upload-box { position: relative; border: 1px dashed #c8d2e2; background: #f7f9fd; display: grid; place-items: center; text-align: center; padding: 26px 20px; color: #687488; min-height: 138px; transition: var(--transition); cursor: pointer; }
 .upload-box:hover { border-color: var(--wia-blue); background: #f0f4ff; }
 .upload-box input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.record-upload-card { width: 100%; min-width: 0; height: 150px; min-height: 150px; border: 1px solid #c9d6e7; background: #fff; color: var(--wia-blue); display: grid; place-items: center; align-content: center; gap: 7px; text-align: center; padding: 18px 14px; transition: var(--transition); }
+.record-upload-card:hover { border-color: var(--wia-blue); background: #f3f7ff; transform: translateY(-1px); }
+.record-upload-icon { width: 42px; height: 42px; display: grid; place-items: center; background: #edf6ff; color: var(--wia-blue); border-radius: 6px; }
+.record-upload-card b { color: #263246; font-size: 14px; font-weight: 950; }
+.record-upload-card small { color: #7d8797; font-size: 11.5px; font-weight: 750; }
 .upload-icon { margin-bottom: 8px; color: #9baac0; }
 .upload-box b { display: block; color: #273244; margin-bottom: 4px; font-size: 13px; }
 .upload-box span { font-size: 11.5px; line-height: 1.5; color: #8494a8; }

@@ -9,6 +9,8 @@ from typing import Callable
 
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
+import av
+import numpy as np
 import torch
 import torchaudio
 from pyannote.audio import Pipeline
@@ -41,6 +43,32 @@ PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 torch.backends.cudnn.enabled = False
 
 ProgressCallback = Callable[[str, int, str], None]
+
+
+def release_gpu_memory(reason=""):
+    gc.collect()
+    if not torch.cuda.is_available():
+        return
+
+    try:
+        torch.cuda.synchronize()
+    except Exception as exc:  # noqa: BLE001 - cleanup should not fail the job.
+        log.warning("CUDA synchronize failed during cleanup: %s", exc)
+
+    before_allocated = torch.cuda.memory_allocated()
+    before_reserved = torch.cuda.memory_reserved()
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
+    after_allocated = torch.cuda.memory_allocated()
+    after_reserved = torch.cuda.memory_reserved()
+    log.info(
+        "CUDA memory cleanup%s - allocated %.1fMiB -> %.1fMiB, reserved %.1fMiB -> %.1fMiB",
+        f" ({reason})" if reason else "",
+        before_allocated / 1024 / 1024,
+        after_allocated / 1024 / 1024,
+        before_reserved / 1024 / 1024,
+        after_reserved / 1024 / 1024,
+    )
 
 
 def elapsed(start):
@@ -256,10 +284,47 @@ def build_segment_audio(segment, mono_waveform, sample_rate):
     return mono_waveform[start_sample:end_sample].cpu().numpy(), sample_rate
 
 
+def load_audio_with_av(audio_path):
+    chunks = []
+    sample_rate = None
+
+    with av.open(str(audio_path)) as container:
+        for frame in container.decode(audio=0):
+            channels = len(frame.layout.channels)
+            samples = frame.to_ndarray()
+
+            if samples.ndim == 1:
+                samples = samples.reshape(1, -1)
+            elif not frame.format.is_planar and samples.shape[0] == 1 and channels > 1:
+                samples = samples.reshape(-1, channels).T
+            elif samples.shape[0] != channels and samples.shape[-1] == channels:
+                samples = samples.T
+
+            if np.issubdtype(samples.dtype, np.integer):
+                samples = samples.astype(np.float32) / np.iinfo(samples.dtype).max
+            else:
+                samples = samples.astype(np.float32)
+
+            chunks.append(samples)
+            sample_rate = frame.sample_rate
+
+    if not chunks or sample_rate is None:
+        raise RuntimeError(f"No audio frames decoded from {audio_path}")
+
+    return torch.from_numpy(np.concatenate(chunks, axis=1)), sample_rate
+
+
+def load_audio(audio_path):
+    try:
+        return torchaudio.load(str(audio_path))
+    except Exception as exc:  # noqa: BLE001 - fallback handles containers torchaudio cannot open.
+        log.warning("torchaudio.load failed, retrying with PyAV: %s", exc)
+        return load_audio_with_av(audio_path)
+
+
 def notify(progress: ProgressCallback | None, stage: str, percent: int, message: str):
     if progress:
         progress(stage, percent, message)
-
 
 
 def extract_json_object(text):
@@ -495,7 +560,7 @@ def transcribe_meeting(audio_path: Path, output_dir: Path, progress: ProgressCal
         notify(progress, "loading", 5, "오디오를 로드하고 있습니다.")
 
         t = time.time()
-        waveform, sample_rate = torchaudio.load(str(audio_path))
+        waveform, sample_rate = load_audio(audio_path)
         audio_length = waveform.shape[1] / sample_rate
         mono_waveform = waveform.mean(dim=0)
         audio_loaded_message = f"오디오 로드 완료 — {audio_length:.1f}초 분량 ({elapsed(t)})"
@@ -625,11 +690,7 @@ def transcribe_meeting(audio_path: Path, output_dir: Path, progress: ProgressCal
         waveform = None
         stt_model = None
         diarization_pipeline = None
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-            log.info("CUDA cache released after meeting transcription")
+        release_gpu_memory("meeting transcription")
 
 
 def apply_speaker_mapping(result: dict, speaker_mapping: dict[str, str], output_dir: Path, match_details=None):

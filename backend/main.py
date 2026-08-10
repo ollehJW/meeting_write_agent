@@ -15,12 +15,12 @@ from zoneinfo import ZoneInfo
 from typing import Literal
 from urllib.parse import quote
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from .processor import apply_speaker_mapping, run_llm_postprocess, transcribe_meeting
+from .processor import apply_speaker_mapping, release_gpu_memory, run_llm_postprocess, transcribe_meeting
 from .read import SUPPORTED_EXTENSIONS, read_text
 from .write import build_prompt, format_transcript, generate_report
 
@@ -400,10 +400,13 @@ def public_user(row):
     return data
 
 
-def get_session_user(authorization: str | None):
-    if not authorization or not authorization.startswith("Bearer "):
+def get_session_user(authorization: str | None = None, token: str | None = None):
+    if token:
+        token = token.strip()
+    elif authorization and authorization.startswith("Bearer "):
+        token = authorization.removeprefix("Bearer ").strip()
+    else:
         raise HTTPException(status_code=401, detail="Authentication required.")
-    token = authorization.removeprefix("Bearer ").strip()
     with sessions_lock:
         session = sessions.get(token)
     if session:
@@ -623,6 +626,8 @@ def run_job(job_id: str):
         )
     except Exception as exc:  # noqa: BLE001 - job errors should surface to API users.
         set_job(job_id, status="failed", stage="failed", progress=100, message=str(exc))
+    finally:
+        release_gpu_memory("job finished")
 
 
 @app.post("/api/auth/login")
@@ -1170,6 +1175,7 @@ def create_report(job_id: str, request: ReportRequest):
         job["meeting_report"] = report_markdown
         job["report_finalized"] = False
 
+    release_gpu_memory("report generated")
     return {"job_id": job_id, "report_markdown": report_markdown}
 
 
@@ -1193,6 +1199,7 @@ def finalize_report(job_id: str, request: ReportFinalizeRequest):
         job["meeting_report"] = report_markdown
         job["report_finalized"] = True
 
+    release_gpu_memory("report finalized")
     return {"job_id": job_id, "report_markdown": report_markdown, "finalized": True}
 
 
@@ -1377,8 +1384,12 @@ def download_meeting_report_references(job_id: str, authorization: str | None = 
 
 
 @app.get("/api/reports/{job_id}/audio")
-def get_meeting_report_audio(job_id: str, authorization: str | None = Header(default=None)):
-    user = get_session_user(authorization)
+def get_meeting_report_audio(
+    job_id: str,
+    authorization: str | None = Header(default=None),
+    token: str | None = Query(default=None),
+):
+    user = get_session_user(authorization, token)
     with get_db_connection() as conn:
         row = conn.execute(
             "SELECT job_id FROM meeting_reports WHERE job_id = ? AND user_uuid = ?",

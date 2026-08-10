@@ -1,1 +1,52 @@
+# Meeting Write systemctl 실행법
+
+## 서비스 시작 및 자동 실행 등록
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now meeting-write-backend.service meeting-write-frontend.service
+```
+
+## 서비스 재시작
+
+```bash
 systemctl --user restart meeting-write-backend.service meeting-write-frontend.service
+```
+
+## 서비스 중지
+
+```bash
+systemctl --user stop meeting-write-backend.service meeting-write-frontend.service
+```
+
+## 상태 확인
+
+```bash
+systemctl --user status meeting-write-backend.service meeting-write-frontend.service
+```
+
+## 로그 확인
+
+```bash
+journalctl --user -u meeting-write-backend.service -f
+journalctl --user -u meeting-write-frontend.service -f
+```
+
+## 재부팅 후 자동 실행 확인
+
+```bash
+loginctl show-user wia | grep Linger
+```
+
+`Linger=yes`가 아니면 아래 명령을 한 번 실행한다.
+
+```bash
+sudo loginctl enable-linger wia
+```
+
+## 접속 주소
+
+```text
+Frontend: https://10.217.183.72:9702
+Backend:  http://10.217.183.72:9701
+```
