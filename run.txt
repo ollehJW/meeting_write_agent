@@ -44,6 +44,21 @@ loginctl show-user wia | grep Linger
 sudo loginctl enable-linger wia
 ```
 
+
+## 자동 정리 스케줄
+
+백엔드 서비스가 실행 중이면 매일 한국시간 05:00에 아래 정리를 자동 수행한다.
+
+- `.jobs_work` 임시 작업 폴더 정리
+- `recording_drafts.created_at` 기준 7일이 지난 보관 녹음 파일 삭제
+- 만료된 보관 녹음의 `recording_drafts` Row 삭제
+
+스케줄 로직은 `meeting-write-backend.service` 안에서 실행되므로 별도 cron 등록은 필요 없다. 변경 사항 반영은 아래 재시작 명령을 사용한다.
+
+```bash
+systemctl --user restart meeting-write-backend.service meeting-write-frontend.service
+```
+
 ## 접속 주소
 
 ```text

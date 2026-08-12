@@ -34,6 +34,7 @@ WORK_ROOT.mkdir(exist_ok=True)
 BACKEND_WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
 KST = ZoneInfo("Asia/Seoul")
 WORK_CLEANUP_HOUR = 5
+RECORDING_DRAFT_RETENTION_DAYS = 7
 INITIAL_PASSWORD = "wia1234!"
 
 cleanup_stop_event = Event()
@@ -508,6 +509,58 @@ def seconds_until_next_work_cleanup():
     return (target - now).total_seconds()
 
 
+def parse_kst_datetime(value: str | None):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=KST)
+    return parsed.astimezone(KST)
+
+
+def clear_expired_recording_drafts():
+    cutoff = datetime.now(KST) - timedelta(days=RECORDING_DRAFT_RETENTION_DAYS)
+    deleted_count = 0
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT draft_uuid, storage_path, created_at FROM recording_drafts"
+        ).fetchall()
+
+        for row in rows:
+            created_at = parse_kst_datetime(row["created_at"])
+            if not created_at or created_at > cutoff:
+                continue
+
+            storage_path = Path(row["storage_path"])
+            if storage_path.exists():
+                storage_path.unlink()
+
+            draft_dir = storage_path.parent
+            try:
+                if (
+                    draft_dir.name == row["draft_uuid"]
+                    and BACKEND_WORKSPACE_ROOT.resolve() in draft_dir.resolve().parents
+                    and draft_dir.exists()
+                ):
+                    shutil.rmtree(draft_dir)
+            except FileNotFoundError:
+                pass
+
+            conn.execute(
+                "DELETE FROM recording_drafts WHERE draft_uuid = ?",
+                (row["draft_uuid"],),
+            )
+            deleted_count += 1
+        conn.commit()
+
+    if deleted_count:
+        print(f"[recording-drafts-cleanup] deleted {deleted_count} expired recording draft(s).", flush=True)
+    return deleted_count
+
+
 def clear_work_root():
     with jobs_lock:
         active_job_ids = {
@@ -528,6 +581,7 @@ def clear_work_root():
 def work_cleanup_loop():
     while not cleanup_stop_event.wait(seconds_until_next_work_cleanup()):
         clear_work_root()
+        clear_expired_recording_drafts()
 
 
 app = FastAPI(title="WIAMeet API")
@@ -538,6 +592,7 @@ def start_work_cleanup_scheduler():
     global cleanup_thread
     init_app_db()
     clear_work_root()
+    clear_expired_recording_drafts()
     if cleanup_thread and cleanup_thread.is_alive():
         return
     cleanup_stop_event.clear()
