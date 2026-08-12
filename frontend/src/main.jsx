@@ -533,6 +533,238 @@ function MobileCreatePage({
   );
 }
 
+function MobileWorkflowSheet({
+  open,
+  mode,
+  onClose,
+  speakerIds,
+  speakerMatches,
+  speakerMapping,
+  onUpdateSpeakerName,
+  selectedSpeakerFilter,
+  setSelectedSpeakerFilter,
+  filteredSentences,
+  audioUrl,
+  audioRef,
+  onPlaySentence,
+  onOpenSentenceEditor,
+  onRemoveSentence,
+  reportInstruction,
+  setReportInstruction,
+  isGeneratingReport,
+  reportMarkdown,
+  setReportMarkdown,
+  reportCompleted,
+  error,
+  editingSentence,
+  editingContent,
+  setEditingContent,
+  editingSpeaker,
+  setEditingSpeaker,
+  setEditingSentence,
+  onSaveSentenceEdit,
+  isSavingMap,
+  onSaveSpeakerMapping,
+  onGenerateReport,
+  isFinalizingReport,
+  onFinalizeReport,
+  isCompletingReport,
+  onCompleteReport,
+}) {
+  if (!open) return null;
+
+  const title = mode === 'mapping' ? '화자 매핑 확인' : mode === 'report_instruction' ? '회의록 작성' : '회의록 확인';
+  const kicker = mode === 'mapping' ? 'Speaker Mapping' : mode === 'report_instruction' ? 'Report Instruction' : 'Report Review';
+  const stepIndex = mode === 'mapping' ? 1 : mode === 'report_instruction' ? 2 : 3;
+
+  return (
+    <div className="mobile-workflow-backdrop">
+      <section className="mobile-workflow-sheet" role="dialog" aria-modal="true" aria-label={title}>
+        <div className="mobile-detail-grip" />
+        <div className="mobile-workflow-head">
+          <div>
+            <span>{kicker}</span>
+            <h2>{title}</h2>
+          </div>
+          <button className="mobile-icon-btn" type="button" onClick={onClose} aria-label="닫기"><X size={18} /></button>
+        </div>
+
+        <div className="mobile-workflow-steps" aria-label="회의록 작성 단계">
+          {['화자 매핑', '작성 지시', '회의록 확인'].map((step, index) => (
+            <div className={index + 1 <= stepIndex ? 'active' : ''} key={step}>
+              <span>{index + 1}</span>
+              <b>{step}</b>
+            </div>
+          ))}
+        </div>
+
+        {mode === 'mapping' && (
+          <div className="mobile-workflow-body">
+            <section className="mobile-workflow-card">
+              <div className="mobile-workflow-card-head">
+                <div><span>Speakers</span><h3>화자 이름 확인</h3></div>
+                <small>{speakerIds.length}명</small>
+              </div>
+              <div className="mobile-speaker-map-list">
+                {speakerIds.map((speakerId) => {
+                  const match = matchBySpeaker(speakerMatches, speakerId);
+                  return (
+                    <label className="mobile-speaker-map-card" key={speakerId}>
+                      <div className="mobile-speaker-map-title">
+                        <span>Speaker {speakerId}</span>
+                        <small>신뢰도 {match?.confidence ?? '-'}</small>
+                      </div>
+                      <input
+                        type="text"
+                        value={speakerMapping[String(speakerId)] || ''}
+                        onChange={(event) => onUpdateSpeakerName(speakerId, event.target.value)}
+                        placeholder={`Speaker ${speakerId}`}
+                      />
+                      <p>{match?.evidence || '자동 매칭 근거가 없습니다.'}</p>
+                    </label>
+                  );
+                })}
+              </div>
+            </section>
+
+            <section className="mobile-workflow-card">
+              <div className="mobile-workflow-card-head">
+                <div><span>Audio</span><h3>발화 확인</h3></div>
+              </div>
+              {audioUrl ? <audio className="mobile-audio-player" ref={audioRef} src={audioUrl} controls preload="metadata" /> : <div className="mobile-empty-card">첨부된 오디오가 없습니다.</div>}
+              <label className="mobile-field mobile-speaker-filter">
+                <span>Speaker 필터</span>
+                <select value={selectedSpeakerFilter} onChange={(event) => setSelectedSpeakerFilter(event.target.value)}>
+                  <option value="all">모두</option>
+                  {speakerIds.map((speakerId) => <option value={String(speakerId)} key={`mobile-speaker-filter-${speakerId}`}>Speaker {speakerId}</option>)}
+                </select>
+              </label>
+              <div className="mobile-sentence-list">
+                {filteredSentences.map((sentence) => (
+                  <article className="mobile-sentence-card" key={sentence.index}>
+                    <div className="mobile-sentence-meta">
+                      <span>Speaker {normalizeSpeakerId(sentence.speaker_id ?? sentence.speaker)}</span>
+                      <small>{sentence.time}</small>
+                    </div>
+                    <p>{sentence.content}</p>
+                    <div className="mobile-sentence-actions">
+                      <button type="button" onClick={() => onPlaySentence(sentence)}><Play size={12} />재생</button>
+                      <button type="button" onClick={() => onOpenSentenceEditor(sentence)}><Pencil size={12} />편집</button>
+                      <button className="danger" type="button" onClick={() => onRemoveSentence(sentence.index)}><Trash2 size={12} />제거</button>
+                    </div>
+                  </article>
+                ))}
+                {filteredSentences.length === 0 && <div className="mobile-empty-card">선택한 Speaker의 발화가 없습니다.</div>}
+              </div>
+            </section>
+          </div>
+        )}
+
+        {mode === 'report_instruction' && (
+          <div className="mobile-workflow-body">
+            <section className="mobile-workflow-card">
+              <div className="mobile-workflow-card-head">
+                <div><span>Instruction</span><h3>회의록 작성 관점</h3></div>
+              </div>
+              <p className="mobile-workflow-help">선택 입력입니다. 특정 인물, 의사결정, 질의응답 등 회의록에서 강조할 기준을 적을 수 있습니다.</p>
+              <textarea
+                className="mobile-report-textarea"
+                value={reportInstruction}
+                onChange={(event) => setReportInstruction(event.target.value)}
+                placeholder="예) 주요 의사결정과 후속 액션을 중심으로 정리하고, 기술 용어는 원문 표현을 유지한다."
+                rows={10}
+                disabled={isGeneratingReport}
+              />
+              {isGeneratingReport && (
+                <div className="mobile-generating-card">
+                  <span className="loading-spinner" aria-hidden="true"></span>
+                  <div><b>회의록 생성 중입니다.</b><p>화자 매핑 결과를 바탕으로 회의록을 작성하고 있습니다.</p></div>
+                </div>
+              )}
+            </section>
+          </div>
+        )}
+
+        {mode === 'report_review' && (
+          <div className="mobile-workflow-body">
+            <section className="mobile-workflow-card">
+              <div className="mobile-workflow-card-head">
+                <div><span>Markdown</span><h3>{reportCompleted ? '확정된 회의록' : '회의록 확인 및 수정'}</h3></div>
+              </div>
+              {reportCompleted ? (
+                <div className="mobile-final-report-view">
+                  <MarkdownReport markdown={reportMarkdown} />
+                </div>
+              ) : (
+                <textarea
+                  className="mobile-report-textarea review"
+                  value={reportMarkdown}
+                  onChange={(event) => setReportMarkdown(event.target.value)}
+                  rows={18}
+                />
+              )}
+              {reportCompleted && <div className="mobile-info-box">회의록이 확정되었습니다. 완료를 누르면 라운지에 저장됩니다.</div>}
+            </section>
+          </div>
+        )}
+
+        {error && <div className="mobile-error-box">{error}</div>}
+
+        {editingSentence && (
+          <div className="mobile-edit-backdrop">
+            <section className="mobile-edit-dialog">
+              <div className="mobile-workflow-card-head">
+                <div><span>Sentence Edit</span><h3>발화 내용 편집</h3></div>
+                <button className="mobile-icon-btn" type="button" onClick={() => setEditingSentence(null)}><X size={18} /></button>
+              </div>
+              <div className="mobile-edit-time">{editingSentence.time}</div>
+              <label className="mobile-field">
+                <span>Speaker Index</span>
+                <input type="text" value={editingSpeaker} onChange={(event) => setEditingSpeaker(event.target.value)} placeholder="예) 0" />
+              </label>
+              <label className="mobile-field">
+                <span>발화 내용</span>
+                <textarea value={editingContent} onChange={(event) => setEditingContent(event.target.value)} rows={6} />
+              </label>
+              <div className="mobile-edit-actions">
+                <button className="mobile-secondary-action bordered" type="button" onClick={() => setEditingSentence(null)}>취소</button>
+                <button className="mobile-primary-action dark" type="button" onClick={onSaveSentenceEdit}>저장</button>
+              </div>
+            </section>
+          </div>
+        )}
+
+        <div className="mobile-workflow-actions">
+          {mode === 'mapping' && (
+            <button className="mobile-primary-action dark" type="button" onClick={onSaveSpeakerMapping} disabled={isSavingMap}>
+              {isSavingMap ? <span className="btn-spinner" aria-hidden="true"></span> : <CheckCircle2 size={18} />}
+              {isSavingMap ? '저장 중' : '매핑 저장'}
+            </button>
+          )}
+          {mode === 'report_instruction' && (
+            <button className="mobile-primary-action dark" type="button" onClick={onGenerateReport} disabled={isGeneratingReport}>
+              {isGeneratingReport ? <span className="btn-spinner" aria-hidden="true"></span> : <FileText size={18} />}
+              {isGeneratingReport ? '생성 중' : '회의록 생성'}
+            </button>
+          )}
+          {mode === 'report_review' && !reportCompleted && (
+            <button className="mobile-primary-action dark" type="button" onClick={onFinalizeReport} disabled={isFinalizingReport || !reportMarkdown.trim()}>
+              {isFinalizingReport ? <span className="btn-spinner" aria-hidden="true"></span> : <CheckCircle2 size={18} />}
+              {isFinalizingReport ? '확정 중' : '회의록 확정'}
+            </button>
+          )}
+          {mode === 'report_review' && reportCompleted && (
+            <button className="mobile-primary-action dark" type="button" onClick={onCompleteReport} disabled={isCompletingReport}>
+              {isCompletingReport ? <span className="btn-spinner" aria-hidden="true"></span> : <CheckCircle2 size={18} />}
+              {isCompletingReport ? '저장 중' : '완료'}
+            </button>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function MobileLoungePage({
   isLoadingLounge,
   loungeError,
@@ -760,6 +992,7 @@ function App() {
   const [processGuideOpen, setProcessGuideOpen] = useState(false);
   const [userGuideOpen, setUserGuideOpen] = useState(false);
   const [isDownloadingReferences, setIsDownloadingReferences] = useState(false);
+  const [deletingReportId, setDeletingReportId] = useState('');
   const [reportCompleted, setReportCompleted] = useState(false);
   const [editingSentence, setEditingSentence] = useState(null);
   const [editingContent, setEditingContent] = useState('');
@@ -784,6 +1017,8 @@ function App() {
     return sentences.filter((sentence) => normalizeSpeakerId(sentence.speaker_id ?? sentence.speaker) === selectedSpeakerFilter);
   }, [result, selectedSpeakerFilter]);
   const audioUrl = useMemo(() => (audioFile ? URL.createObjectURL(audioFile) : ''), [audioFile]);
+  const activeMeetingAudioFile = isMobileRoute && mobileView === 'create' ? (mobileCreateAudioLinked ? mobileCreateAudioFile : null) : pcCreateAudioFile;
+  const analysisAudioUrl = useMemo(() => (activeMeetingAudioFile ? URL.createObjectURL(activeMeetingAudioFile) : audioUrl), [activeMeetingAudioFile, audioUrl]);
   const recorderSupported = typeof window !== 'undefined' && Boolean(window.MediaRecorder && navigator.mediaDevices?.getUserMedia);
   const recordingStatus = isRecording ? (isRecordingPaused ? 'paused' : 'recording') : audioFile ? 'stopped' : 'idle';
   const recordingStatusLabel = {
@@ -880,7 +1115,6 @@ function App() {
       recentReports,
     };
   }, [loungeReports, members, homeCategoryMonth]);
-  const activeMeetingAudioFile = isMobileRoute && mobileView === 'create' ? (mobileCreateAudioLinked ? mobileCreateAudioFile : null) : pcCreateAudioFile;
   const canStart = activeMeetingAudioFile && meetingTitle.trim() && selectedCategoryUuid && meetingPurpose.trim() && meetingDate && meetingStartTime && meetingEndTime && meetingOrganizations.length > 0 && participants.length > 0 && (!job || job.status === 'failed' || job.status === 'completed');
 
   const currentKstMonth = useMemo(() => formatMonthKey(getKstToday()), []);
@@ -1326,6 +1560,32 @@ function App() {
     setLoungeAudioUrl('');
   }
 
+  async function deleteLoungeReport(report) {
+    if (!report?.job_id || deletingReportId) return;
+    const confirmed = window.confirm(`"${report.title || '회의록'}" 회의록을 삭제할까요? 삭제하면 회의록, 녹음, 참고자료가 함께 삭제됩니다.`);
+    if (!confirmed) return;
+
+    setDeletingReportId(report.job_id);
+    setLoungeError('');
+    try {
+      const response = await fetch(API_BASE + '/api/reports/' + report.job_id, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
+      if (response.status === 401) {
+        handleExpiredSession();
+        return;
+      }
+      if (!response.ok) throw await apiError(response, '회의록을 삭제하지 못했습니다.');
+      setLoungeReports((prev) => prev.filter((item) => item.job_id !== report.job_id));
+      if (selectedLoungeReport?.job_id === report.job_id) closeLoungeReport();
+    } catch (err) {
+      setLoungeError(err.message);
+    } finally {
+      setDeletingReportId('');
+    }
+  }
+
   async function downloadReferenceZip() {
     const jobId = selectedLoungeReport?.job_id || loungeDetail?.job_id;
     if (!jobId || !loungeDetail?.has_references) return;
@@ -1457,7 +1717,7 @@ function App() {
   }
 
   function playSentence(sentence) {
-    if (!audioRef.current || !audioUrl) return;
+    if (!audioRef.current || !analysisAudioUrl) return;
     audioRef.current.currentTime = parseStartSeconds(sentence.time);
     audioRef.current.play().catch(() => undefined);
   }
@@ -2013,8 +2273,12 @@ function App() {
       });
       if (!response.ok) throw await apiError(response, '회의록 확정 저장에 실패했습니다.');
       setReportCompleted(true);
-      setCurrentView('report');
-      setModalOpen(false);
+      if (isMobileRoute) {
+        setModalMode('report_review');
+      } else {
+        setCurrentView('report');
+        setModalOpen(false);
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -2061,6 +2325,10 @@ function App() {
       });
       if (!response.ok) throw await apiError(response, '회의록 저장 완료 처리에 실패했습니다.');
       resetMeetingWorkflow();
+      if (isMobileRoute) {
+        await loadLoungeReports();
+        navigateMobile('lounge');
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -2245,6 +2513,44 @@ function App() {
     return (
       <>
         <MobileMeetApp current={mobileView} onNavigate={navigateMobile}>{mobilePage}</MobileMeetApp>
+        <MobileWorkflowSheet
+          open={modalOpen}
+          mode={modalMode}
+          onClose={() => setModalOpen(false)}
+          speakerIds={speakerIds}
+          speakerMatches={speakerMatches}
+          speakerMapping={speakerMapping}
+          onUpdateSpeakerName={updateSpeakerName}
+          selectedSpeakerFilter={selectedSpeakerFilter}
+          setSelectedSpeakerFilter={setSelectedSpeakerFilter}
+          filteredSentences={filteredSentences}
+          audioUrl={analysisAudioUrl}
+          audioRef={audioRef}
+          onPlaySentence={playSentence}
+          onOpenSentenceEditor={openSentenceEditor}
+          onRemoveSentence={removeSentence}
+          reportInstruction={reportInstruction}
+          setReportInstruction={setReportInstruction}
+          isGeneratingReport={isGeneratingReport}
+          reportMarkdown={reportMarkdown}
+          setReportMarkdown={setReportMarkdown}
+          reportCompleted={reportCompleted}
+          error={error}
+          editingSentence={editingSentence}
+          editingContent={editingContent}
+          setEditingContent={setEditingContent}
+          editingSpeaker={editingSpeaker}
+          setEditingSpeaker={setEditingSpeaker}
+          setEditingSentence={setEditingSentence}
+          onSaveSentenceEdit={saveSentenceEdit}
+          isSavingMap={isSavingMap}
+          onSaveSpeakerMapping={saveSpeakerMapping}
+          onGenerateReport={generateMeetingReport}
+          isFinalizingReport={isFinalizingReport}
+          onFinalizeReport={finalizeMeetingReport}
+          isCompletingReport={isCompletingReport}
+          onCompleteReport={completeMeetingReport}
+        />
     {draftSaveOpen && (
       <div className="draft-modal-backdrop open" onClick={() => setDraftSaveOpen(false)}>
         <form className="draft-modal" onSubmit={saveRecordingDraft} onClick={(event) => event.stopPropagation()}>
@@ -2960,12 +3266,24 @@ function App() {
                     </div>
                     <div className="lounge-report-list">
                       {group.reports.map((report) => (
-                        <button className="lounge-report-row" type="button" key={report.report_uuid} onClick={() => openLoungeReport(report)}>
-                          <div>
-                            <b>{report.title}</b>
-                            <span>{report.category_name || '카테고리 미지정'} · 참가 {(report.participants || []).length}명 · {report.start_time || '--:--'} - {report.end_time || '--:--'}</span>
-                          </div>
-                        </button>
+                        <div className="lounge-report-row" key={report.report_uuid}>
+                          <button className="lounge-report-open" type="button" onClick={() => openLoungeReport(report)}>
+                            <div>
+                              <b>{report.title}</b>
+                              <span>{report.category_name || '카테고리 미지정'} · 참가 {(report.participants || []).length}명 · {report.start_time || '--:--'} - {report.end_time || '--:--'}</span>
+                            </div>
+                          </button>
+                          <button
+                            className="lounge-report-delete-btn"
+                            type="button"
+                            onClick={() => deleteLoungeReport(report)}
+                            disabled={deletingReportId === report.job_id}
+                            title="회의록 삭제"
+                            aria-label="회의록 삭제"
+                          >
+                            {deletingReportId === report.job_id ? <span className="btn-spinner blue" aria-hidden="true"></span> : <Trash2 size={15} />}
+                          </button>
+                        </div>
                       ))}
                     </div>
                   </section>
@@ -3407,8 +3725,8 @@ function App() {
             <section className="sample-column">
               <div className="audio-panel">
                 <b>오디오 재생</b>
-                {audioUrl ? (
-                  <audio ref={audioRef} src={audioUrl} controls preload="metadata" />
+                {analysisAudioUrl ? (
+                  <audio ref={audioRef} src={analysisAudioUrl} controls preload="metadata" />
                 ) : (
                   <div className="audio-empty">첨부된 오디오가 없습니다.</div>
                 )}

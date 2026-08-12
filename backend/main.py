@@ -1459,6 +1459,29 @@ def list_meeting_reports(authorization: str | None = Header(default=None)):
     return {"reports": reports}
 
 
+@app.delete("/api/reports/{job_id}")
+def delete_meeting_report(job_id: str, authorization: str | None = Header(default=None)):
+    user = get_session_user(authorization)
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT job_id FROM meeting_reports WHERE job_id = ? AND user_uuid = ?",
+            (job_id, user["user_uuid"]),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Report not found.")
+        conn.execute(
+            "DELETE FROM meeting_reports WHERE job_id = ? AND user_uuid = ?",
+            (job_id, user["user_uuid"]),
+        )
+        conn.commit()
+
+    shutil.rmtree(JOB_ROOT / job_id, ignore_errors=True)
+    shutil.rmtree(WORK_ROOT / job_id, ignore_errors=True)
+    with jobs_lock:
+        jobs.pop(job_id, None)
+    return {"deleted": True}
+
+
 @app.get("/api/reports/{job_id}")
 def get_meeting_report_detail(job_id: str, authorization: str | None = Header(default=None)):
     user = get_session_user(authorization)
