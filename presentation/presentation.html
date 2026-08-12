@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>회의록 생성 Agent - 기획 배경</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@600;800;900&family=Noto+Sans+KR:wght@400;500;700;900&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#eef2f7;
+    --panel:#ffffff;
+    --ink:#172033;
+    --muted:#647084;
+    --line:#dbe3ef;
+    --blue:#173b8f;
+    --cyan:#1b9fd8;
+    --gold:#b9863d;
+    --green:#315f53;
+    --shadow:0 22px 70px -42px rgba(23,32,51,.42);
+  }
+
+  *{ box-sizing:border-box; }
+  html{ scroll-behavior:smooth; }
+  body{
+    margin:0;
+    background:linear-gradient(180deg,#f7f9fc 0%,var(--bg) 100%);
+    color:var(--ink);
+    font-family:"Noto Sans KR",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{ color:inherit; text-decoration:none; }
+
+  .topbar{
+    position:sticky;
+    top:0;
+    z-index:10;
+    height:72px;
+    border-bottom:1px solid rgba(219,227,239,.86);
+    background:rgba(255,255,255,.88);
+    backdrop-filter:blur(18px);
+  }
+  .topbar-inner{
+    max-width:1280px;
+    height:100%;
+    margin:0 auto;
+    padding:0 36px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:28px;
+  }
+  .brand{
+    display:flex;
+    align-items:center;
+    gap:12px;
+    font-weight:950;
+    color:var(--ink);
+    white-space:nowrap;
+  }
+  .brand-mark{
+    width:34px;
+    height:34px;
+    display:grid;
+    place-items:center;
+    background:var(--blue);
+    color:#fff;
+    font-family:"IBM Plex Mono",monospace;
+    font-size:13px;
+    border-radius:6px;
+  }
+  .nav{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    overflow-x:auto;
+  }
+  .nav a{
+    min-height:34px;
+    padding:0 12px;
+    display:inline-flex;
+    align-items:center;
+    border:1px solid transparent;
+    color:var(--muted);
+    font-size:12px;
+    font-weight:900;
+    white-space:nowrap;
+  }
+  .nav a:hover{ color:var(--blue); border-color:#cbd8eb; background:#f6f9fd; }
+
+  .hero{
+    max-width:1280px;
+    margin:0 auto;
+    padding:72px 36px 42px;
+    display:grid;
+    grid-template-columns:minmax(0,1.18fr) minmax(360px,.82fr);
+    gap:52px;
+    align-items:end;
+  }
+  .eyebrow{
+    display:inline-flex;
+    align-items:center;
+    gap:9px;
+    margin-bottom:18px;
+    color:var(--blue);
+    font-family:"IBM Plex Mono",monospace;
+    font-size:12px;
+    font-weight:600;
+    letter-spacing:.12em;
+    text-transform:uppercase;
+  }
+  .eyebrow::before{
+    content:"";
+    width:8px;
+    height:8px;
+    border-radius:50%;
+    background:var(--cyan);
+  }
+  h1{
+    margin:0;
+    max-width:860px;
+    font-family:"Noto Serif KR",serif;
+    font-size:clamp(46px,5.4vw,82px);
+    line-height:1.08;
+    letter-spacing:-.04em;
+    font-weight:900;
+  }
+  .lede{
+    margin:28px 0 0;
+    max-width:720px;
+    color:var(--muted);
+    font-size:18px;
+    line-height:1.8;
+  }
+  .hero-panel{
+    border:1px solid var(--line);
+    background:var(--panel);
+    box-shadow:var(--shadow);
+    padding:28px;
+    display:grid;
+    gap:18px;
+  }
+  .hero-panel b{
+    font-size:18px;
+    font-weight:950;
+  }
+  .hero-panel p{
+    margin:0;
+    color:var(--muted);
+    font-size:14px;
+    line-height:1.7;
+  }
+  .metric-grid{
+    display:grid;
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:10px;
+  }
+  .metric{
+    min-height:82px;
+    border:1px solid #e1e8f2;
+    background:#f8fafd;
+    padding:14px;
+    display:grid;
+    align-content:center;
+    gap:5px;
+  }
+  .metric strong{
+    color:var(--blue);
+    font-family:"IBM Plex Mono",monospace;
+    font-size:22px;
+  }
+  .metric span{
+    color:var(--muted);
+    font-size:12px;
+    font-weight:800;
+  }
+
+  .content{
+    max-width:1280px;
+    margin:0 auto;
+    padding:18px 36px 88px;
+  }
+  .section-head{
+    margin:34px 0 18px;
+    display:flex;
+    align-items:flex-end;
+    justify-content:space-between;
+    gap:24px;
+  }
+  .section-head h2{
+    margin:0;
+    font-size:24px;
+    font-weight:950;
+    letter-spacing:-.02em;
+  }
+  .section-head p{
+    margin:0;
+    color:var(--muted);
+    font-size:14px;
+  }
+  .reason-grid{
+    display:grid;
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:18px;
+  }
+  .reason{
+    min-height:306px;
+    position:relative;
+    overflow:hidden;
+    border:1px solid var(--line);
+    background:var(--panel);
+    box-shadow:var(--shadow);
+    padding:30px;
+    display:grid;
+    align-content:start;
+    gap:16px;
+    opacity:0;
+    transform:translateY(16px);
+    transition:opacity .55s ease,transform .55s ease,border-color .25s ease;
+  }
+  .reason.in{ opacity:1; transform:translateY(0); }
+  .reason:hover{ border-color:#b9c9e2; }
+  .reason::after{
+    content:"";
+    position:absolute;
+    right:-34px;
+    top:-34px;
+    width:116px;
+    height:116px;
+    border-radius:50%;
+    border:22px solid rgba(27,159,216,.08);
+  }
+  .tag{
+    width:fit-content;
+    min-height:28px;
+    padding:0 10px;
+    display:inline-flex;
+    align-items:center;
+    background:#eef4ff;
+    color:var(--blue);
+    font-family:"IBM Plex Mono",monospace;
+    font-size:11px;
+    font-weight:600;
+    letter-spacing:.08em;
+  }
+  .reason .eyebrow{
+    margin:0;
+    color:var(--gold);
+    font-size:11px;
+  }
+  .reason h3{
+    margin:0;
+    max-width:20ch;
+    font-family:"Noto Serif KR",serif;
+    font-size:26px;
+    line-height:1.36;
+    letter-spacing:-.03em;
+  }
+  .reason p{
+    margin:0;
+    color:var(--muted);
+    font-size:15px;
+    line-height:1.78;
+  }
+
+  .comparison-section{
+    margin-top:56px;
+    padding-top:18px;
+  }
+  .comparison-wrap{
+    border:1px solid var(--line);
+    background:var(--panel);
+    box-shadow:var(--shadow);
+    overflow:hidden;
+  }
+  .comparison-scroll{
+    overflow-x:auto;
+  }
+  .comparison-titlebar{
+    padding:30px 32px 24px;
+    display:flex;
+    align-items:flex-end;
+    justify-content:space-between;
+    gap:24px;
+    border-bottom:1px solid var(--line);
+    background:linear-gradient(135deg,#ffffff 0%,#f5f8fc 100%);
+  }
+  .comparison-titlebar h2{
+    margin:0;
+    font-size:28px;
+    line-height:1.28;
+    font-weight:950;
+    letter-spacing:-.03em;
+  }
+  .comparison-titlebar p{
+    margin:0;
+    max-width:360px;
+    color:var(--muted);
+    font-size:14px;
+    line-height:1.7;
+    text-align:right;
+  }
+  .comparison-table{
+    width:100%;
+    min-width:1080px;
+    border-collapse:collapse;
+    table-layout:fixed;
+  }
+  .comparison-table th,
+  .comparison-table td{
+    padding:22px 24px;
+    border-bottom:1px solid #e6edf6;
+    vertical-align:top;
+    text-align:left;
+  }
+  .comparison-table thead th{
+    background:#f9fbfe;
+    color:#4c5b70;
+    font-size:12px;
+    font-weight:950;
+    letter-spacing:.08em;
+    text-transform:uppercase;
+  }
+  .comparison-table tbody tr:last-child th,
+  .comparison-table tbody tr:last-child td{
+    border-bottom:0;
+  }
+  .comparison-table tbody th{
+    width:18%;
+    color:var(--ink);
+    font-size:15px;
+    font-weight:950;
+  }
+  .comparison-table td{
+    color:var(--muted);
+    font-size:14px;
+    line-height:1.65;
+  }
+  .comparison-table .ours{
+    background:#fbfdff;
+    color:#263246;
+    font-weight:700;
+  }
+  .comparison-table .mark{
+    display:inline-flex;
+    min-width:28px;
+    height:28px;
+    margin-right:10px;
+    align-items:center;
+    justify-content:center;
+    border-radius:6px;
+    background:#eef4ff;
+    color:var(--blue);
+    font-family:"IBM Plex Mono",monospace;
+    font-size:12px;
+    font-weight:600;
+  }
+  .priority-star{
+    margin-left:4px;
+    color:#d43d3d;
+    font-weight:950;
+  }
+  .comparison-note{
+    display:grid;
+    grid-template-columns:1fr auto;
+    gap:20px;
+    align-items:center;
+    padding:20px 32px;
+    border-top:1px solid var(--line);
+    background:#172033;
+    color:rgba(255,255,255,.82);
+  }
+  .comparison-note strong{
+    color:#fff;
+    font-size:15px;
+  }
+  .comparison-note span{
+    color:rgba(255,255,255,.66);
+    font-size:13px;
+  }
+  .comparison-note code{
+    padding:8px 10px;
+    border:1px solid rgba(255,255,255,.16);
+    border-radius:6px;
+    color:#fff;
+    font-family:"IBM Plex Mono",monospace;
+    font-size:12px;
+  }
+
+  .demo-section{
+    margin-top:56px;
+    padding-top:18px;
+  }
+  .demo-wrap{
+    border:1px solid var(--line);
+    background:var(--panel);
+    box-shadow:var(--shadow);
+    overflow:hidden;
+  }
+  .demo-head{
+    padding:30px 32px 24px;
+    display:flex;
+    align-items:flex-end;
+    justify-content:space-between;
+    gap:24px;
+    border-bottom:1px solid var(--line);
+    background:#fff;
+  }
+  .demo-head h2{
+    margin:0;
+    font-size:28px;
+    line-height:1.28;
+    font-weight:950;
+    letter-spacing:-.03em;
+  }
+  .demo-head p{
+    margin:0;
+    color:var(--muted);
+    font-size:14px;
+    line-height:1.7;
+    text-align:right;
+  }
+  .video-frame{
+    position:relative;
+    background:#0e1524;
+    aspect-ratio:16 / 9;
+  }
+  .video-frame video{
+    width:100%;
+    height:100%;
+    display:block;
+    object-fit:contain;
+    background:#0e1524;
+  }
+  .play-overlay{
+    position:absolute;
+    inset:0;
+    display:grid;
+    place-items:center;
+    border:0;
+    background:linear-gradient(180deg,rgba(14,21,36,.18),rgba(14,21,36,.42));
+    color:#fff;
+    cursor:pointer;
+    transition:opacity .2s ease,visibility .2s ease;
+  }
+  .play-overlay.is-hidden{
+    opacity:0;
+    visibility:hidden;
+    pointer-events:none;
+  }
+  .play-button{
+    width:86px;
+    height:86px;
+    display:grid;
+    place-items:center;
+    border-radius:50%;
+    background:#fff;
+    color:var(--blue);
+    box-shadow:0 22px 60px rgba(0,0,0,.34);
+  }
+  .play-button::before{
+    content:"";
+    width:0;
+    height:0;
+    margin-left:6px;
+    border-top:16px solid transparent;
+    border-bottom:16px solid transparent;
+    border-left:24px solid currentColor;
+  }
+  .play-label{
+    position:absolute;
+    left:32px;
+    bottom:28px;
+    display:grid;
+    gap:6px;
+    text-align:left;
+  }
+  .play-label strong{
+    font-size:18px;
+    font-weight:950;
+  }
+  .play-label span{
+    color:rgba(255,255,255,.72);
+    font-size:13px;
+  }
+
+
+  footer{
+    max-width:1280px;
+    margin:0 auto;
+    padding:24px 36px 44px;
+    display:flex;
+    justify-content:space-between;
+    gap:18px;
+    color:#7a8596;
+    font-family:"IBM Plex Mono",monospace;
+    font-size:11px;
+    letter-spacing:.06em;
+  }
+
+  @media (max-width:980px){
+    .hero{ grid-template-columns:1fr; }
+    .reason-grid{ grid-template-columns:1fr; }
+    .comparison-titlebar{ align-items:flex-start; flex-direction:column; }
+    .comparison-titlebar p{ text-align:left; }
+    .comparison-table{ min-width:0; }
+    .comparison-table,
+    .comparison-table thead,
+    .comparison-table tbody,
+    .comparison-table tr,
+    .comparison-table th,
+    .comparison-table td{ display:block; width:100%; }
+    .comparison-table thead{ display:none; }
+    .comparison-table tbody tr{ border-bottom:1px solid var(--line); }
+    .comparison-table tbody tr:last-child{ border-bottom:0; }
+    .comparison-table tbody th{ border-bottom:0; padding-bottom:8px; }
+    .comparison-table td{ border-bottom:0; padding-top:8px; }
+    .comparison-table td::before{
+      display:block;
+      margin-bottom:6px;
+      color:#7d899b;
+      font-size:11px;
+      font-weight:950;
+      letter-spacing:.08em;
+    }
+    .comparison-table td:nth-child(2)::before{ content:"Wia Meet"; }
+    .comparison-table td:nth-child(3)::before{ content:"MS Copilot"; }
+    .comparison-table td:nth-child(4)::before{ content:"NOTTA AI"; }
+    .comparison-table td:nth-child(5)::before{ content:"CLOVA NOTE"; }
+    .comparison-note{ grid-template-columns:1fr; }
+    .demo-head{ align-items:flex-start; flex-direction:column; }
+    .demo-head p{ text-align:left; }
+
+  }
+  @media (max-width:680px){
+    .topbar{ height:auto; }
+    .topbar-inner{ padding:14px 18px; align-items:flex-start; flex-direction:column; }
+    .hero,.content,footer{ padding-left:18px; padding-right:18px; }
+    .hero{ padding-top:44px; }
+    .hero-panel,.reason{ padding:24px; }
+    .demo-head{ padding:24px; }
+    .play-button{ width:72px; height:72px; }
+    .play-label{ left:24px; bottom:22px; }
+    footer{ flex-direction:column; }
+  }
+</style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#cover"><span class="brand-mark">WM</span><span>WIAMeet 기획 배경</span></a>
+      <nav class="nav" aria-label="문서 내 이동">
+        <a href="#r1">정확도</a>
+        <a href="#r2">지식 축적</a>
+        <a href="#r3">정보 접근성</a>
+        <a href="#r4">회의 집중도</a>
+        <a href="#comparison">상용 서비스 비교</a>
+        <a href="#demo">시연</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero" id="cover">
+      <div>
+        <span class="eyebrow">Meeting Report Agent</span>
+        <h1>회의록은 왜 사람이 아니라 시스템이 남겨야 할까</h1>
+        <p class="lede">
+          매주 수십 건의 회의가 열리고, 그만큼의 회의록이 만들어집니다.
+          그런데 그 기록은 회의가 끝나는 순간 어디로 흩어지고, 누가 다시 찾아볼 수 있을까요.
+          네 가지 이유에서 회의록 생성 Agent 기획이 출발했습니다.
+        </p>
+      </div>
+      <aside class="hero-panel" aria-label="기획 요약">
+        <b>핵심 방향</b>
+        <p>회의를 단발성 이벤트가 아니라, 다시 찾고 활용할 수 있는 업무 데이터로 전환합니다.</p>
+        <div class="metric-grid">
+          <div class="metric"><strong>01</strong><span>정확한 기록</span></div>
+          <div class="metric"><strong>02</strong><span>검색 가능한 지식</span></div>
+          <div class="metric"><strong>03</strong><span>정보 접근성</span></div>
+          <div class="metric"><strong>04</strong><span>회의 집중도</span></div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="content">
+      <div class="section-head">
+        <div>
+          <span class="eyebrow">Planning Reasons</span>
+          <h2>회의록 생성 Agent가 필요한 이유</h2>
+        </div>
+        <p>내부 업무 흐름 기준으로 정리한 핵심 배경</p>
+      </div>
+
+      <div class="reason-grid">
+        <article class="reason" id="r1">
+          <span class="tag">사유 01</span>
+          <span class="eyebrow">기록의 정확도</span>
+          <h3>사람이 적을수록, 회의는 조금씩 편집된다</h3>
+          <p>
+            회의록은 대개 참석자 중 한 사람이 수작업으로 정리합니다. 발언 속도를 따라가지 못해 중요한 내용이 빠지거나,
+            정리하는 사람의 관점에 따라 강조점이 달라지기도 합니다. AI가 발언을 빠짐없이 받아 적고 구조화하면,
+            기록의 품질이 누가 정리했는지에 따라 달라지지 않습니다.
+          </p>
+        </article>
+
+        <article class="reason" id="r2">
+          <span class="tag">사유 02</span>
+          <span class="eyebrow">지식의 축적</span>
+          <h3>회의는 끝나도, 논의는 남아야 한다</h3>
+          <p>
+            회의록은 개인 메모장, Teams 메신저, OneDrive 등에 저장해 관리하는 경우가 많습니다.
+            단기적인 보관에는 문제가 없지만, 회의록이 많아질수록 필요한 내용을 다시 찾고 맥락을 이어가기 어려워집니다.
+            회의록을 체계적으로 쌓아두면 조직의 판단과 맥락 자체가 검색 가능한 자산으로 남습니다.
+          </p>
+        </article>
+
+        <article class="reason" id="r3">
+          <span class="tag">사유 03</span>
+          <span class="eyebrow">정보 접근성</span>
+          <h3>참석하지 못한 회의도, 놓치지 않게</h3>
+          <p>
+            모든 논의에 모든 사람이 참석할 수는 없습니다. 참석하지 못한 회의는 참여한 사람에게 구두로 물어보거나,
+            회의록을 별도로 요청해야만 내용을 확인할 수 있습니다. 회의록이 표준화되어 열람 가능해지면,
+            참석 여부와 관계없이 필요한 사람이 필요한 시점에 논의 내용과 결정 배경을 확인할 수 있습니다.
+          </p>
+        </article>
+
+        <article class="reason" id="r4">
+          <span class="tag">사유 04</span>
+          <span class="eyebrow">회의 집중도</span>
+          <h3>받아 적는 대신, 논의에 집중하도록</h3>
+          <p>
+            누군가 계속 타이핑에 신경 쓰는 회의는 흐름이 끊기기 쉽습니다. 기록을 시스템에 맡기면 참석자는
+            논의 자체에 온전히 집중할 수 있고, 회의록 작성자는 사후 정리에 쓰던 시간을 다른 업무로 돌릴 수 있습니다.
+          </p>
+        </article>
+      </div>
+
+      <section class="comparison-section" id="comparison">
+        <div class="comparison-wrap">
+          <div class="comparison-titlebar">
+            <div>
+              <span class="eyebrow">Build or Buy</span>
+              <h2>우리는 왜 직접 만들었나 — 상용 서비스와 비교</h2>
+            </div>
+          </div>
+
+          <div class="comparison-scroll">
+            <table class="comparison-table" aria-label="Wia Meet과 상용 회의록 서비스 비교">
+            <thead>
+              <tr>
+                <th scope="col">구분</th>
+                <th scope="col">Wia Meet</th>
+                <th scope="col">MS Copilot</th>
+                <th scope="col">NOTTA AI</th>
+                <th scope="col">CLOVA NOTE</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><span class="mark">01</span>화자 분리 성능</th>
+                <td class="ours">화자 분리 후 데이터 후처리를 거쳐 높은 품질을 확보합니다.</td>
+                <td>Teams 마이크 기반이라 같은 회의실에서 녹음한 경우 화자 구분이 미흡합니다.</td>
+                <td>자체 한국어 모델을 내장해 높은 성능이 예상됩니다.</td>
+                <td>자체 한국어 모델을 내장해 높은 성능이 예상됩니다.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="mark">02</span>STT 성능</th>
+                <td class="ours">STT 모델 출력물에 LLM 교정 프로세스를 추가해 높은 품질을 확보합니다.</td>
+                <td>한국어 기반 모델이 아니어서 기술 주제가 많은 회의에서는 성능이 미흡합니다.</td>
+                <td>자체 한국어 모델을 내장해 높은 성능이 예상됩니다.</td>
+                <td>자체 한국어 모델을 내장해 높은 성능이 예상됩니다.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="mark">03</span>비용 <span class="priority-star">★</span></th>
+                <td class="ours">무료로 사용할 수 있습니다.</td>
+                <td>Copilot 계정이 필요합니다.</td>
+                <td>사용자당 월 약 4만 원이 필요합니다.</td>
+                <td>기업 계정 기준 월 192만 원 수준입니다.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="mark">04</span>보안 <span class="priority-star">★</span></th>
+                <td class="ours">사내 서버에서 직접 구동해 외부 유출 위험을 줄일 수 있습니다.</td>
+                <td>회사 OneDrive에 저장되어 비교적 안전합니다.</td>
+                <td>회의 데이터가 해외 AWS 서버에 저장되어 보안 위험이 있습니다.</td>
+                <td>회의 데이터가 외부 서버에 저장되어 보안 위험이 있습니다.</td>
+              </tr>
+              <tr>
+                <th scope="row"><span class="mark">05</span>확장성</th>
+                <td class="ours">사용 시나리오와 Web UI를 직접 기획·개발해 다양한 기능으로 확장할 수 있습니다.</td>
+                <td>정해진 형태로만 사용할 수 있습니다.</td>
+                <td>정해진 형태로만 사용할 수 있습니다.</td>
+                <td>정해진 형태로만 사용할 수 있습니다.</td>
+              </tr>
+            </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="demo-section" id="demo">
+        <div class="demo-wrap">
+          <div class="demo-head">
+            <div>
+              <span class="eyebrow">Demo Video</span>
+              <h2>시연 영상</h2>
+            </div>
+            <p>재생 버튼을 누르면 Wia Meet 시연 영상이 재생됩니다.</p>
+          </div>
+          <div class="video-frame">
+            <video id="demoVideo" src="시연.mp4" preload="metadata" playsinline controls></video>
+            <button class="play-overlay" id="demoPlay" type="button" aria-label="시연 영상 재생">
+              <span class="play-button" aria-hidden="true"></span>
+              <span class="play-label">
+                <strong>시연 영상 재생</strong>
+                <span>Click to play</span>
+              </span>
+            </button>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <footer>
+    <span>회의록 생성 Agent · 기획 배경 노트</span>
+    <span>DRAFT - INTERNAL</span>
+  </footer>
+
+<script>
+  const reasons = document.querySelectorAll('.reason');
+  const reveal = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('in');
+        reveal.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.12 });
+  reasons.forEach((reason) => reveal.observe(reason));
+
+  const demoVideo = document.getElementById('demoVideo');
+  const demoPlay = document.getElementById('demoPlay');
+  if (demoVideo && demoPlay) {
+    demoPlay.addEventListener('click', async () => {
+      try {
+        await demoVideo.play();
+      } catch (error) {
+        demoVideo.controls = true;
+      }
+    });
+    demoVideo.addEventListener('play', () => demoPlay.classList.add('is-hidden'));
+    demoVideo.addEventListener('pause', () => {
+      if (!demoVideo.ended) demoPlay.classList.remove('is-hidden');
+    });
+    demoVideo.addEventListener('ended', () => demoPlay.classList.remove('is-hidden'));
+  }
+</script>
+</body>
+</html>

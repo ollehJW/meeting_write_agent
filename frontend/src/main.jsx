@@ -24,7 +24,7 @@ const USER_GUIDE_MARKDOWN = `# 사용 가이드
 - 녹음 시작 후 일시정지, 재개, 종료가 가능합니다.
 - 녹음이 끝나면 브라우저가 만든 원본 오디오 파일이 생성됩니다.
 - **회의록 생성으로 이동**을 누르면 녹음 파일이 생성 화면에 자동으로 연결됩니다.
-- **다운로드**를 누르면 녹음 파일을 로컬에 저장할 수 있습니다.
+- PC 화면에서는 **다운로드**로 녹음 파일을 저장할 수 있으며, 모바일 화면은 보안 정책에 따라 녹음 파일 다운로드를 제공하지 않습니다.
 
 ## 3. 회의록 생성 프로세스
 
@@ -113,6 +113,502 @@ function MarkdownReport({ markdown }) {
   );
 }
 
+
+
+function getMobileViewFromPath(pathname = window.location.pathname) {
+  const segment = pathname.split('/').filter(Boolean)[1] || 'home';
+  return ['home', 'record', 'create', 'lounge'].includes(segment) ? segment : 'home';
+}
+
+function MobileBottomNav({ current, onNavigate }) {
+  const items = [
+    { id: 'home', label: '홈', icon: Home },
+    { id: 'record', label: '녹음', icon: Mic2 },
+    { id: 'create', label: '작성', icon: FileText },
+    { id: 'lounge', label: '라운지', icon: Tags },
+  ];
+  return (
+    <nav className="mobile-bottom-nav" aria-label="모바일 페이지 이동">
+      {items.map(({ id, label, icon: Icon }) => (
+        <button className={current === id ? 'active' : ''} type="button" key={id} onClick={() => onNavigate(id)}>
+          <Icon size={18} />
+          <span>{label}</span>
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+function MobilePageHeader({ kicker, title, description, action }) {
+  return (
+    <header className="mobile-page-head">
+      <div>
+        <span>{kicker}</span>
+        <h1>{title}</h1>
+        {description && <p>{description}</p>}
+      </div>
+      {action}
+    </header>
+  );
+}
+
+function MobileMeetHome({ authUser, homeStats, onLogout, onOpenDesktop, onNavigate }) {
+  const recentReports = homeStats.recentReports.slice(0, 3);
+  return (
+    <>
+      <header className="mobile-meet-topbar">
+        <div className="mobile-brand-lockup">
+          <span className="wia-mark mobile-wia-mark">WIA</span>
+          <div>
+            <b>WIAMeet</b>
+            <span>Mobile</span>
+          </div>
+        </div>
+        <button className="mobile-icon-btn" type="button" onClick={onLogout} aria-label="로그아웃">
+          <LogOut size={18} />
+        </button>
+      </header>
+
+      <section className="mobile-hero-card">
+        <span className="mobile-kicker">Meet Home</span>
+        <h1>{authUser.display_name || authUser.username}님, 안녕하세요.</h1>
+        <p>휴대폰에서는 회의 녹음, 파일 업로드, 회의록 확인 흐름을 빠르게 사용할 수 있습니다.</p>
+        <div className="mobile-hero-actions">
+          <button className="mobile-primary-action" type="button" onClick={() => onNavigate('create')}>
+            <FileText size={18} />
+            회의록 작성
+          </button>
+          <button className="mobile-secondary-action" type="button" onClick={onOpenDesktop}>
+            <FileText size={18} />
+            PC 화면 열기
+          </button>
+        </div>
+      </section>
+
+      <section className="mobile-summary-grid" aria-label="회의록 요약">
+        <div className="mobile-summary-card primary">
+          <FileText size={18} />
+          <span>전체 회의록</span>
+          <b>{homeStats.totalReports}</b>
+        </div>
+        <div className="mobile-summary-card">
+          <CalendarDays size={18} />
+          <span>지난주 회의</span>
+          <b>{homeStats.lastWeekCount}</b>
+          <small>{homeStats.lastWeekRange}</small>
+        </div>
+        <div className="mobile-summary-card wide">
+          <Trophy size={18} />
+          <span>지난 주 우리팀의 회의 부자</span>
+          <b>{homeStats.topParticipant?.name || '-'}</b>
+          <small>{homeStats.topParticipant ? `${homeStats.topParticipant.count}회 참석` : '지난주 참석 기록이 없습니다.'}</small>
+        </div>
+      </section>
+
+      <section className="mobile-panel">
+        <div className="mobile-panel-head">
+          <div>
+            <span>Recent</span>
+            <h2>최근 회의록</h2>
+          </div>
+          <small>최근 3건</small>
+        </div>
+        <div className="mobile-recent-list">
+          {recentReports.map((report) => (
+            <article className="mobile-recent-card" key={report.report_uuid}>
+              <b>{report.title}</b>
+              <span>{report.category_name || '카테고리 미지정'} · 참가 {(report.participants || []).length}명</span>
+              <small>{report.meeting_date || '-'} · {report.start_time || '--:--'}</small>
+            </article>
+          ))}
+          {recentReports.length === 0 && <div className="mobile-empty-card">최근 회의록이 없습니다.</div>}
+        </div>
+      </section>
+    </>
+  );
+}
+
+function MobileRecordPage({
+  recorderSupported,
+  recordingStatus,
+  recordingStatusLabel,
+  recordingSeconds,
+  recordingBars,
+  recordingError,
+  audioFile,
+  audioUrl,
+  onStart,
+  onPauseResume,
+  onStop,
+  onClear,
+  onUseForCreate,
+}) {
+  const duration = formatRecordingDuration(recordingSeconds);
+  return (
+    <>
+      <MobilePageHeader
+        kicker="Mobile Recorder"
+        title="회의 녹음"
+        description="휴대폰 마이크로 회의를 녹음하고, 녹음 파일을 회의록 생성에 바로 연결합니다."
+      />
+      <section className={`mobile-record-card ${recordingStatus === 'recording' ? 'active' : ''}`}>
+        <div className="mobile-record-status">
+          <span className={`record-status-dot ${recordingStatus}`}>{recordingStatus === 'recording' && <span />}</span>
+          <b>{recordingStatusLabel}</b>
+        </div>
+        <div className="mobile-record-timer">
+          <span>{duration.minutes}</span>
+          <i>:</i>
+          <span>{duration.seconds}</span>
+        </div>
+        <div className={`record-waveform mobile-waveform ${recordingStatus === 'recording' ? 'active' : ''}`}>
+          {recordingBars.map((height, index) => (
+            <i key={index} style={{ height: recordingStatus === 'recording' ? `${height}px` : '7px', opacity: recordingStatus === 'recording' ? 0.55 + (height / 40) * 0.45 : 1 }} />
+          ))}
+        </div>
+        <div className="mobile-record-actions">
+          {recordingStatus === 'idle' && (
+            <button className="mobile-primary-action dark" type="button" onClick={onStart} disabled={!recorderSupported}>
+              <Mic2 size={18} />녹음 시작
+            </button>
+          )}
+          {(recordingStatus === 'recording' || recordingStatus === 'paused') && (
+            <>
+              <button className="mobile-secondary-action light" type="button" onClick={onPauseResume}>
+                {recordingStatus === 'recording' ? <Pause size={18} /> : <Play size={18} />}
+                {recordingStatus === 'recording' ? '일시정지' : '재개'}
+              </button>
+              <button className="mobile-primary-action danger" type="button" onClick={onStop}>
+                <Square size={18} />종료
+              </button>
+            </>
+          )}
+          {recordingStatus === 'stopped' && (
+            <button className="mobile-primary-action dark" type="button" onClick={onStart}>
+              <Mic2 size={18} />다시 녹음
+            </button>
+          )}
+        </div>
+      </section>
+      {recordingError && <div className="mobile-error-box">{recordingError}</div>}
+      {!recorderSupported && <div className="mobile-error-box">현재 브라우저가 마이크 녹음을 지원하지 않습니다.</div>}
+      {audioFile && (
+        <section className="mobile-panel">
+          <div className="mobile-panel-head">
+            <div>
+              <span>Saved Audio</span>
+              <h2>녹음 파일</h2>
+            </div>
+          </div>
+          <div className="mobile-audio-file">
+            <b>{audioFile.name}</b>
+            <span>모바일 보안 정책에 따라 녹음 파일 다운로드는 제공하지 않습니다.</span>
+          </div>
+          <audio className="mobile-audio-player" src={audioUrl} controls preload="metadata" />
+          <div className="mobile-stack-actions">
+            <button className="mobile-primary-action dark" type="button" onClick={onUseForCreate}><FileText size={18} />회의록 생성으로 이동</button>
+            <button className="mobile-secondary-action bordered danger-text" type="button" onClick={onClear}><Trash2 size={18} />삭제</button>
+          </div>
+        </section>
+      )}
+    </>
+  );
+}
+
+function MobileCreatePage({
+  categories,
+  selectedCategoryUuid,
+  setSelectedCategoryUuid,
+  meetingTitle,
+  setMeetingTitle,
+  meetingDate,
+  setMeetingDate,
+  meetingStartTime,
+  setMeetingStartTime,
+  meetingEndTime,
+  setMeetingEndTime,
+  meetingPurpose,
+  setMeetingPurpose,
+  meetingOrganizations,
+  setMeetingOrganizations,
+  members,
+  participants,
+  setParticipants,
+  audioFile,
+  referenceFiles,
+  setReferenceFiles,
+  job,
+  error,
+  canStart,
+  onUploadAndRun,
+  onOpenRecorder,
+}) {
+  const [organizationText, setOrganizationText] = useState('');
+  const [participantText, setParticipantText] = useState('');
+  const [teamSheetOpen, setTeamSheetOpen] = useState(false);
+  const addValue = (value, setter, clear) => {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    setter((prev) => (prev.includes(trimmed) ? prev : [...prev, trimmed]));
+    clear('');
+  };
+  const teamMembers = members
+    .map((member) => member.member_name?.trim())
+    .filter(Boolean);
+  const availableTeamMembers = teamMembers.filter((memberName) => !participants.includes(memberName));
+  const addTeamMember = (memberName) => {
+    setParticipants((prev) => (prev.includes(memberName) ? prev : [...prev, memberName]));
+  };
+  const addAllTeamMembers = () => {
+    setParticipants((prev) => {
+      const existing = new Set(prev);
+      const nextMembers = teamMembers.filter((memberName) => !existing.has(memberName));
+      return nextMembers.length ? [...prev, ...nextMembers] : prev;
+    });
+  };
+  return (
+    <>
+      <MobilePageHeader
+        kicker="Create Report"
+        title="회의록 생성"
+        description="모바일에서는 핵심 정보와 녹음 파일을 빠르게 등록하는 흐름으로 구성했습니다."
+      />
+      <section className="mobile-form-card">
+        <label className="mobile-field">
+          <span>회의 제목</span>
+          <input value={meetingTitle} onChange={(event) => setMeetingTitle(event.target.value)} placeholder="회의 제목 입력" />
+        </label>
+        <label className="mobile-field">
+          <span>카테고리</span>
+          <select value={selectedCategoryUuid} onChange={(event) => setSelectedCategoryUuid(event.target.value)}>
+            <option value="">카테고리 선택</option>
+            {categories.map((category) => <option value={category.category_uuid} key={category.category_uuid}>{category.category_name}</option>)}
+          </select>
+        </label>
+        <label className="mobile-field">
+          <span>회의 목적</span>
+          <textarea value={meetingPurpose} onChange={(event) => setMeetingPurpose(event.target.value)} placeholder="회의 목적 입력" rows={3} />
+        </label>
+        <div className="mobile-two-fields">
+          <label className="mobile-field">
+            <span>회의 날짜</span>
+            <input type="date" value={meetingDate} onChange={(event) => setMeetingDate(event.target.value)} />
+          </label>
+          <div className="mobile-time-pair">
+            <label className="mobile-field">
+              <span>시작 시간</span>
+              <input type="time" value={meetingStartTime} onChange={(event) => setMeetingStartTime(event.target.value)} />
+            </label>
+            <label className="mobile-field">
+              <span>종료 시간</span>
+              <input type="time" value={meetingEndTime} onChange={(event) => setMeetingEndTime(event.target.value)} />
+            </label>
+          </div>
+        </div>
+        <div className="mobile-chip-editor">
+          <span>참석 조직</span>
+          <div className="mobile-inline-add">
+            <input value={organizationText} onChange={(event) => setOrganizationText(event.target.value)} placeholder="조직 입력" />
+            <button type="button" onClick={() => addValue(organizationText, setMeetingOrganizations, setOrganizationText)}><Plus size={16} /></button>
+          </div>
+          <div className="mobile-chip-list">
+            {meetingOrganizations.map((item, index) => <button type="button" key={`${item}-${index}`} onClick={() => setMeetingOrganizations((prev) => prev.filter((_, i) => i !== index))}>{item}<X size={13} /></button>)}
+          </div>
+        </div>
+        <div className="mobile-chip-editor">
+          <div className="mobile-chip-title-row">
+            <span>참석자</span>
+            <button className="mobile-team-open-btn" type="button" onClick={() => setTeamSheetOpen(true)}>
+              <UserPlus size={15} />우리팀 간편 추가
+            </button>
+          </div>
+          <div className="mobile-inline-add">
+            <input value={participantText} onChange={(event) => setParticipantText(event.target.value)} placeholder="참석자 입력" />
+            <button type="button" onClick={() => addValue(participantText, setParticipants, setParticipantText)}><Plus size={16} /></button>
+          </div>
+          <div className="mobile-chip-list">
+            {participants.map((item, index) => <button type="button" key={`${item}-${index}`} onClick={() => setParticipants((prev) => prev.filter((_, i) => i !== index))}>{item}<X size={13} /></button>)}
+          </div>
+        </div>
+      </section>
+      <section className="mobile-form-card">
+        {audioFile ? (
+          <div className="mobile-record-linked-card">
+            <CheckCircle2 size={26} />
+            <div>
+              <b>회의 녹음 연동 완료</b>
+              <span>{audioFile.name}</span>
+            </div>
+          </div>
+        ) : (
+          <button className="mobile-record-link-button" type="button" onClick={onOpenRecorder}>
+            <Mic2 size={28} />
+            <b>회의 녹음으로 이동</b>
+            <span>녹음 종료 후 회의록 작성에 바로 연결됩니다.</span>
+          </button>
+        )}
+        <label className="mobile-upload-tile secondary">
+          <input type="file" accept=".ppt,.pptx,.pdf" multiple onChange={(event) => setReferenceFiles(Array.from(event.target.files || []))} />
+          <FileText size={28} />
+          <b>{referenceFiles.length ? `${referenceFiles.length}개 참고자료 선택됨` : '회의 참고자료 선택'}</b>
+          <span>PPT, PPTX, PDF</span>
+        </label>
+      </section>
+      {error && <div className="mobile-error-box">{error}</div>}
+      {job && (
+        <section className="mobile-panel">
+          <div className="mobile-panel-head"><div><span>Processing</span><h2>{job.status === 'completed' ? '분석 완료' : '회의록 분석 중'}</h2></div><small>{job.progress}%</small></div>
+          <div className="mobile-progress-track"><span style={{ width: `${job.progress || 0}%` }} /></div>
+          <p className="mobile-job-message">{job.message}</p>
+        </section>
+      )}
+      <button className="mobile-floating-action" type="button" disabled={!canStart} onClick={onUploadAndRun}>
+        <Play size={18} />회의록 분석 시작
+      </button>
+      {teamSheetOpen && (
+        <div className="mobile-sheet-backdrop" onClick={() => setTeamSheetOpen(false)}>
+          <section className="mobile-team-sheet" onClick={(event) => event.stopPropagation()}>
+            <div className="mobile-detail-grip" />
+            <div className="mobile-team-sheet-head">
+              <div>
+                <span>Team Members</span>
+                <h2>우리팀 간편 추가</h2>
+              </div>
+              <div className="mobile-team-sheet-actions">
+                <button className="mobile-secondary-action bordered" type="button" disabled={!availableTeamMembers.length} onClick={addAllTeamMembers}>
+                  전체 추가
+                </button>
+                <button className="mobile-icon-btn" type="button" onClick={() => setTeamSheetOpen(false)}><X size={18} /></button>
+              </div>
+            </div>
+            <div className="mobile-team-member-list">
+              {teamMembers.map((memberName) => {
+                const alreadyAdded = participants.includes(memberName);
+                return (
+                  <button
+                    className={alreadyAdded ? 'mobile-team-member-card added' : 'mobile-team-member-card'}
+                    type="button"
+                    key={memberName}
+                    disabled={alreadyAdded}
+                    onClick={() => addTeamMember(memberName)}
+                  >
+                    <span>{memberName}</span>
+                    <small>{alreadyAdded ? '추가됨' : '탭해서 추가'}</small>
+                  </button>
+                );
+              })}
+              {teamMembers.length === 0 && <div className="mobile-empty-card">등록된 팀원이 없습니다.</div>}
+            </div>
+          </section>
+        </div>
+      )}
+    </>
+  );
+}
+
+function MobileLoungePage({
+  isLoadingLounge,
+  loungeError,
+  filteredLoungeReports,
+  loungeCategoryOptions,
+  loungeCategoryFilter,
+  setLoungeCategoryFilter,
+  loungeMonthFilter,
+  setLoungeMonthFilter,
+  selectedLoungeReport,
+  loungeDetail,
+  loungeAudioUrl,
+  isLoadingLoungeDetail,
+  isLoadingLoungeAudio,
+  loungeAudioRef,
+  onOpenReport,
+  onCloseReport,
+  onPlayRecap,
+}) {
+  const [detailTab, setDetailTab] = useState('report');
+
+  useEffect(() => {
+    setDetailTab('report');
+  }, [selectedLoungeReport?.report_uuid]);
+
+  return (
+    <>
+      <MobilePageHeader
+        kicker="Report Lounge"
+        title="회의록 라운지"
+        description="저장된 회의록을 모바일에서 빠르게 확인합니다."
+      />
+      <section className="mobile-filter-card">
+        <select value={loungeCategoryFilter} onChange={(event) => setLoungeCategoryFilter(event.target.value)}>
+          <option value="all">전체 카테고리</option>
+          {loungeCategoryOptions.map((category) => <option value={category.value} key={category.value}>{category.label}</option>)}
+        </select>
+        <input type="month" value={loungeMonthFilter} onChange={(event) => setLoungeMonthFilter(event.target.value)} />
+      </section>
+      {loungeError && <div className="mobile-error-box">{loungeError}</div>}
+      {isLoadingLounge && <div className="mobile-empty-card">회의록을 불러오는 중입니다.</div>}
+      <section className="mobile-report-list">
+        {filteredLoungeReports.map((report) => (
+          <button className="mobile-report-card" type="button" key={report.report_uuid} onClick={() => onOpenReport(report)}>
+            <b>{report.title}</b>
+            <span>{report.category_name || '카테고리 미지정'} · 참가 {(report.participants || []).length}명</span>
+            <small>{report.meeting_date || '-'} · {report.start_time || '--:--'} - {report.end_time || '--:--'}</small>
+          </button>
+        ))}
+        {!isLoadingLounge && filteredLoungeReports.length === 0 && <div className="mobile-empty-card">표시할 회의록이 없습니다.</div>}
+      </section>
+      {selectedLoungeReport && (
+        <div className="mobile-detail-sheet">
+          <div className="mobile-detail-grip" />
+          <div className="mobile-detail-head">
+            <div>
+              <span>Report</span>
+              <h2>{selectedLoungeReport.title}</h2>
+            </div>
+            <button className="mobile-icon-btn" type="button" onClick={onCloseReport}><X size={18} /></button>
+          </div>
+          <div className="mobile-detail-tabs" role="tablist" aria-label="회의록 상세 보기">
+            <button className={detailTab === 'report' ? 'active' : ''} type="button" role="tab" aria-selected={detailTab === 'report'} onClick={() => setDetailTab('report')}>회의록</button>
+            <button className={detailTab === 'recap' ? 'active' : ''} type="button" role="tab" aria-selected={detailTab === 'recap'} onClick={() => setDetailTab('recap')}>녹음 복기</button>
+          </div>
+          {detailTab === 'report' && (
+            isLoadingLoungeDetail ? <div className="mobile-empty-card">회의록을 불러오는 중입니다.</div> : <MarkdownReport markdown={loungeDetail?.report_markdown || ''} />
+          )}
+          {detailTab === 'recap' && (
+            <div className="mobile-recap-tab-panel">
+              <section className="mobile-panel compact">
+                <div className="mobile-panel-head"><div><span>Audio</span><h2>회의 오디오</h2></div></div>
+                {loungeAudioUrl ? <audio className="mobile-audio-player" ref={loungeAudioRef} src={loungeAudioUrl} controls preload="metadata" /> : <div className="mobile-empty-card">{isLoadingLoungeAudio ? '오디오를 불러오는 중입니다.' : '저장된 오디오가 없습니다.'}</div>}
+              </section>
+              <section className="mobile-panel compact">
+                <div className="mobile-panel-head"><div><span>Recap</span><h2>회의록 복기</h2></div></div>
+                <div className="mobile-recap-list">
+                  {(loungeDetail?.recap || []).slice(0, 20).map((item, index) => (
+                    <button className="mobile-recap-card" type="button" key={`${item.index ?? index}-${item.time || ''}`} onClick={() => onPlayRecap(item)}>
+                      <span>{item.speaker || item.speaker_id || 'Speaker'} · {item.time || '--:--'}</span>
+                      <b>{item.content || item.sentence || ''}</b>
+                    </button>
+                  ))}
+                  {!isLoadingLoungeDetail && (!loungeDetail?.recap || loungeDetail.recap.length === 0) && <div className="mobile-empty-card">복기할 녹음 구간이 없습니다.</div>}
+                </div>
+              </section>
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+function MobileMeetApp({ current, children, onNavigate }) {
+  return (
+    <main className="mobile-meet-shell has-bottom-nav">
+      {children}
+      <MobileBottomNav current={current} onNavigate={onNavigate} />
+    </main>
+  );
+}
+
 function getKstToday() {
   const kstNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Seoul' }));
   return new Date(kstNow.getFullYear(), kstNow.getMonth(), kstNow.getDate());
@@ -129,6 +625,12 @@ function formatMonthKey(date) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
   return `${year}-${month}`;
+}
+
+function formatRecordingDuration(seconds) {
+  const minutes = String(Math.floor(seconds / 60)).padStart(2, '0');
+  const rest = String(seconds % 60).padStart(2, '0');
+  return { minutes, seconds: rest };
 }
 
 function App() {
@@ -196,6 +698,7 @@ function App() {
   const [modalOpen, setModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState('mapping');
   const [currentView, setCurrentView] = useState('home');
+  const [mobilePath, setMobilePath] = useState(() => window.location.pathname);
   const [error, setError] = useState('');
   const [isSavingMap, setIsSavingMap] = useState(false);
   const [reportInstruction, setReportInstruction] = useState('');
@@ -232,6 +735,8 @@ function App() {
   const mediaStreamRef = useRef(null);
   const recordingChunksRef = useRef([]);
   const recordingTimerRef = useRef(null);
+  const isMobileRoute = mobilePath === '/mobile' || mobilePath.startsWith('/mobile/');
+  const mobileView = getMobileViewFromPath(mobilePath);
 
   const speakerIds = useMemo(() => speakerIdsFromResult(result), [result]);
   const filteredSentences = useMemo(() => {
@@ -357,11 +862,6 @@ function App() {
     setHomeCategoryMonth(nextMonth);
   }
 
-  function formatRecordingDuration(seconds) {
-    const minutes = String(Math.floor(seconds / 60)).padStart(2, '0');
-    const rest = String(seconds % 60).padStart(2, '0');
-    return { minutes, seconds: rest };
-  }
 
   function preferredAudioMimeType() {
     const candidates = [
@@ -525,6 +1025,18 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const handlePopState = () => setMobilePath(window.location.pathname);
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  function navigateMobile(view) {
+    const path = view === 'home' ? '/mobile/home' : `/mobile/${view}`;
+    window.history.pushState({}, '', path);
+    setMobilePath(path);
+  }
+
+  useEffect(() => {
     return () => {
       if (audioUrl) URL.revokeObjectURL(audioUrl);
     };
@@ -557,20 +1069,20 @@ function App() {
 
   useEffect(() => {
     if (!authToken) return;
-    if (currentView === 'home' || currentView === 'lounge') {
+    if (currentView === 'home' || currentView === 'lounge' || (isMobileRoute && (mobileView === 'home' || mobileView === 'lounge'))) {
       loadLoungeReports();
     }
-  }, [currentView, authToken]);
+  }, [currentView, authToken, isMobileRoute, mobileView]);
 
   useEffect(() => {
     if (!authToken) return;
-    if (currentView === 'home' || currentView === 'record' || currentView === 'create' || currentView === 'settings') {
+    if (currentView === 'home' || currentView === 'record' || currentView === 'create' || currentView === 'settings' || isMobileRoute) {
       loadMembers();
     }
-    if (currentView === 'create' || currentView === 'settings') {
+    if (currentView === 'create' || currentView === 'settings' || (isMobileRoute && mobileView === 'create')) {
       loadCategories();
     }
-  }, [currentView, authToken]);
+  }, [currentView, authToken, isMobileRoute, mobileView]);
 
   async function loadLoungeReports() {
     setIsLoadingLounge(true);
@@ -1452,6 +1964,98 @@ function App() {
       </form>
     </div>
   ) : null;
+
+  if (isMobileRoute) {
+    let mobilePage = null;
+    if (mobileView === 'home') {
+      mobilePage = (
+        <MobileMeetHome
+          authUser={authUser}
+          homeStats={homeStats}
+          onLogout={handleLogout}
+          onOpenDesktop={() => { window.location.href = '/'; }}
+          onNavigate={navigateMobile}
+        />
+      );
+    } else if (mobileView === 'record') {
+      mobilePage = (
+        <MobileRecordPage
+          recorderSupported={recorderSupported}
+          recordingStatus={recordingStatus}
+          recordingStatusLabel={recordingStatusLabel}
+          recordingSeconds={recordingSeconds}
+          recordingBars={recordingBars}
+          recordingError={recordingError}
+          audioFile={audioFile}
+          audioUrl={audioUrl}
+          onStart={startBrowserRecording}
+          onPauseResume={pauseOrResumeBrowserRecording}
+          onStop={stopBrowserRecording}
+          onClear={clearRecordedAudio}
+          onUseForCreate={() => navigateMobile('create')}
+        />
+      );
+    } else if (mobileView === 'create') {
+      mobilePage = (
+        <MobileCreatePage
+          categories={categories}
+          selectedCategoryUuid={selectedCategoryUuid}
+          setSelectedCategoryUuid={setSelectedCategoryUuid}
+          meetingTitle={meetingTitle}
+          setMeetingTitle={setMeetingTitle}
+          meetingDate={meetingDate}
+          setMeetingDate={setMeetingDate}
+          meetingStartTime={meetingStartTime}
+          setMeetingStartTime={setMeetingStartTime}
+          meetingEndTime={meetingEndTime}
+          setMeetingEndTime={setMeetingEndTime}
+          meetingPurpose={meetingPurpose}
+          setMeetingPurpose={setMeetingPurpose}
+          meetingOrganizations={meetingOrganizations}
+          setMeetingOrganizations={setMeetingOrganizations}
+          members={members}
+          participants={participants}
+          setParticipants={setParticipants}
+          audioFile={audioFile}
+          referenceFiles={referenceFiles}
+          setReferenceFiles={setReferenceFiles}
+          job={job}
+          error={error}
+          canStart={canStart}
+          onUploadAndRun={uploadAndRun}
+          onOpenRecorder={() => navigateMobile('record')}
+        />
+      );
+    } else if (mobileView === 'lounge') {
+      mobilePage = (
+        <MobileLoungePage
+          isLoadingLounge={isLoadingLounge}
+          loungeError={loungeError}
+          filteredLoungeReports={filteredLoungeReports}
+          loungeCategoryOptions={loungeCategoryOptions}
+          loungeCategoryFilter={loungeCategoryFilter}
+          setLoungeCategoryFilter={setLoungeCategoryFilter}
+          loungeMonthFilter={loungeMonthFilter}
+          setLoungeMonthFilter={setLoungeMonthFilter}
+          selectedLoungeReport={selectedLoungeReport}
+          loungeDetail={loungeDetail}
+          loungeAudioUrl={loungeAudioUrl}
+          isLoadingLoungeDetail={isLoadingLoungeDetail}
+          isLoadingLoungeAudio={isLoadingLoungeAudio}
+          loungeAudioRef={loungeAudioRef}
+          onOpenReport={openLoungeReport}
+          onCloseReport={closeLoungeReport}
+          onPlayRecap={playLoungeRecapItem}
+        />
+      );
+    }
+    return (
+      <>
+        <MobileMeetApp current={mobileView} onNavigate={navigateMobile}>{mobilePage}</MobileMeetApp>
+        {passwordSetupModal}
+      </>
+    );
+  }
 
   return (
     <>
