@@ -142,6 +142,19 @@ function MobileBottomNav({ current, onNavigate }) {
   );
 }
 
+function detectMobilePlatform() {
+  if (typeof window === 'undefined') return 'other';
+  const ua = navigator.userAgent || navigator.vendor || '';
+  if (/android/i.test(ua)) return 'android';
+  if (/iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) return 'ios';
+  return 'other';
+}
+
+function isPwaStandalone() {
+  if (typeof window === 'undefined') return false;
+  return window.matchMedia?.('(display-mode: standalone)').matches || window.navigator.standalone === true;
+}
+
 function MobilePageHeader({ kicker, title, description, action }) {
   return (
     <header className="mobile-page-head">
@@ -152,6 +165,78 @@ function MobilePageHeader({ kicker, title, description, action }) {
       </div>
       {action}
     </header>
+  );
+}
+
+function MobileLoginPage({
+  loginUsername,
+  setLoginUsername,
+  loginPassword,
+  setLoginPassword,
+  loginError,
+  isLoggingIn,
+  onLogin,
+  installPromptReady,
+  isStandalone,
+  mobilePlatform,
+  onInstallApp,
+}) {
+  return (
+    <main className="mobile-login-shell">
+      <section className="mobile-login-brand">
+        <span className="wia-mark mobile-wia-mark">WIA</span>
+        <div>
+          <b>WIAMeet</b>
+          <p>회의 녹음과 회의록 자동 작성을 모바일에서 바로 시작하세요.</p>
+        </div>
+      </section>
+
+      <form className="mobile-login-card" onSubmit={onLogin}>
+        <div className="mobile-login-head">
+          <span>Account Login</span>
+          <h1>로그인</h1>
+        </div>
+        <label className="mobile-field">
+          <span>아이디</span>
+          <input
+            type="text"
+            value={loginUsername}
+            onChange={(event) => setLoginUsername(event.target.value)}
+            autoComplete="username"
+            placeholder="아이디를 입력하세요"
+          />
+        </label>
+        <label className="mobile-field">
+          <span>비밀번호</span>
+          <input
+            type="password"
+            value={loginPassword}
+            onChange={(event) => setLoginPassword(event.target.value)}
+            autoComplete="current-password"
+            placeholder="비밀번호를 입력하세요"
+          />
+        </label>
+        {loginError && <div className="mobile-error-box">{loginError}</div>}
+        <button className="mobile-primary-action dark" type="submit" disabled={isLoggingIn}>
+          {isLoggingIn ? <span className="btn-spinner" aria-hidden="true"></span> : <LogIn size={18} />}
+          {isLoggingIn ? '로그인 중' : '로그인'}
+        </button>
+      </form>
+
+      <section className="mobile-login-install-card">
+        <div className="mobile-install-icon"><Download size={20} /></div>
+        <div>
+          <span>Mobile App</span>
+          <b>{isStandalone ? '앱으로 실행 중입니다.' : 'WIAMeet 앱 설치'}</b>
+          <p>{isStandalone ? '홈 화면 아이콘으로 실행된 상태입니다.' : mobilePlatform === 'ios' ? 'Safari 공유 버튼에서 홈 화면에 추가를 선택하세요.' : '홈 화면에 설치하면 앱처럼 바로 실행할 수 있습니다.'}</p>
+        </div>
+        {!isStandalone && (
+          <button className="mobile-install-button" type="button" onClick={onInstallApp}>
+            {mobilePlatform === 'ios' ? '설치 방법' : installPromptReady ? '앱 설치' : '설치 안내'}
+          </button>
+        )}
+      </section>
+    </main>
   );
 }
 
@@ -994,6 +1079,9 @@ function App() {
   const [userGuideOpen, setUserGuideOpen] = useState(false);
   const [mobileAppModalOpen, setMobileAppModalOpen] = useState(false);
   const [mobileAppQrUrl, setMobileAppQrUrl] = useState('');
+  const [deferredInstallPrompt, setDeferredInstallPrompt] = useState(null);
+  const [installHelpOpen, setInstallHelpOpen] = useState(false);
+  const [isStandaloneApp, setIsStandaloneApp] = useState(() => isPwaStandalone());
   const [isDownloadingReferences, setIsDownloadingReferences] = useState(false);
   const [deletingReportId, setDeletingReportId] = useState('');
   const [reportCompleted, setReportCompleted] = useState(false);
@@ -1012,6 +1100,7 @@ function App() {
   const recordingTimerRef = useRef(null);
   const isMobileRoute = mobilePath === '/mobile' || mobilePath.startsWith('/mobile/');
   const mobileView = getMobileViewFromPath(mobilePath);
+  const mobilePlatform = useMemo(() => detectMobilePlatform(), []);
 
   const speakerIds = useMemo(() => speakerIdsFromResult(result), [result]);
   const filteredSentences = useMemo(() => {
@@ -1041,6 +1130,37 @@ function App() {
       .then(setMobileAppQrUrl)
       .catch(() => setMobileAppQrUrl(''));
   }, [mobileAppModalOpen, mobileAppUrl]);
+
+  useEffect(() => {
+    const handleBeforeInstallPrompt = (event) => {
+      event.preventDefault();
+      setDeferredInstallPrompt(event);
+    };
+    const handleAppInstalled = () => {
+      setDeferredInstallPrompt(null);
+      setIsStandaloneApp(true);
+      setInstallHelpOpen(false);
+    };
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    window.addEventListener('appinstalled', handleAppInstalled);
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      window.removeEventListener('appinstalled', handleAppInstalled);
+    };
+  }, []);
+
+  async function installMobileApp() {
+    if (isStandaloneApp) return;
+    if (deferredInstallPrompt) {
+      const promptEvent = deferredInstallPrompt;
+      setDeferredInstallPrompt(null);
+      promptEvent.prompt();
+      await promptEvent.userChoice.catch(() => undefined);
+      setIsStandaloneApp(isPwaStandalone());
+      return;
+    }
+    setInstallHelpOpen(true);
+  }
 
   const recordingHasContent = recordingStatus !== 'idle';
   const selectedCategory = useMemo(() => (
@@ -2354,6 +2474,50 @@ function App() {
 
 
   if (!authUser || !authToken) {
+    if (isMobileRoute) {
+      return (
+        <>
+          <MobileLoginPage
+            loginUsername={loginUsername}
+            setLoginUsername={setLoginUsername}
+            loginPassword={loginPassword}
+            setLoginPassword={setLoginPassword}
+            loginError={loginError}
+            isLoggingIn={isLoggingIn}
+            onLogin={handleLogin}
+            installPromptReady={Boolean(deferredInstallPrompt)}
+            isStandalone={isStandaloneApp}
+            mobilePlatform={mobilePlatform}
+            onInstallApp={installMobileApp}
+          />
+          {installHelpOpen && (
+            <div className="mobile-sheet-backdrop" onClick={() => setInstallHelpOpen(false)}>
+              <section className="mobile-install-sheet" onClick={(event) => event.stopPropagation()}>
+                <div className="mobile-detail-grip" />
+                <div className="mobile-team-sheet-head">
+                  <div>
+                    <span>Install App</span>
+                    <h2>WIAMeet 앱 설치</h2>
+                  </div>
+                  <button className="mobile-icon-btn" type="button" onClick={() => setInstallHelpOpen(false)}><X size={18} /></button>
+                </div>
+                {mobilePlatform === 'ios' ? (
+                  <div className="mobile-install-help">
+                    <p>iPhone에서는 Safari 하단 공유 버튼을 누른 뒤 <b>홈 화면에 추가</b>를 선택하세요.</p>
+                    <p>홈 화면에 WIAMeet 아이콘이 생성되고, 다음부터 앱처럼 실행할 수 있습니다.</p>
+                  </div>
+                ) : (
+                  <div className="mobile-install-help">
+                    <p>브라우저 메뉴에서 <b>앱 설치</b> 또는 <b>홈 화면에 추가</b>를 선택하세요.</p>
+                    <p>설치 버튼이 보이지 않으면 사내 HTTPS 인증서와 브라우저 설치 조건을 확인해야 합니다.</p>
+                  </div>
+                )}
+              </section>
+            </div>
+          )}
+        </>
+      );
+    }
     return (
       <main className="login-shell">
         <section className="login-panel">
@@ -2566,6 +2730,31 @@ function App() {
           isCompletingReport={isCompletingReport}
           onCompleteReport={completeMeetingReport}
         />
+        {installHelpOpen && (
+          <div className="mobile-sheet-backdrop" onClick={() => setInstallHelpOpen(false)}>
+            <section className="mobile-install-sheet" onClick={(event) => event.stopPropagation()}>
+              <div className="mobile-detail-grip" />
+              <div className="mobile-team-sheet-head">
+                <div>
+                  <span>Install App</span>
+                  <h2>WIAMeet 앱 설치</h2>
+                </div>
+                <button className="mobile-icon-btn" type="button" onClick={() => setInstallHelpOpen(false)}><X size={18} /></button>
+              </div>
+              {mobilePlatform === 'ios' ? (
+                <div className="mobile-install-help">
+                  <p>iPhone에서는 Safari 하단 공유 버튼을 누른 뒤 <b>홈 화면에 추가</b>를 선택하세요.</p>
+                  <p>홈 화면에 WIAMeet 아이콘이 생성되고, 다음부터 앱처럼 실행할 수 있습니다.</p>
+                </div>
+              ) : (
+                <div className="mobile-install-help">
+                  <p>브라우저 메뉴에서 <b>앱 설치</b> 또는 <b>홈 화면에 추가</b>를 선택하세요.</p>
+                  <p>설치 버튼이 보이지 않으면 사내 HTTPS 인증서와 브라우저 설치 조건을 확인해야 합니다.</p>
+                </div>
+              )}
+            </section>
+          </div>
+        )}
     {draftSaveOpen && (
       <div className="draft-modal-backdrop open" onClick={() => setDraftSaveOpen(false)}>
         <form className="draft-modal" onSubmit={saveRecordingDraft} onClick={(event) => event.stopPropagation()}>
@@ -3692,12 +3881,20 @@ function App() {
             <button className="icon-btn" type="button" onClick={() => setMobileAppModalOpen(false)} aria-label="모바일 앱 다운로드 닫기"><X size={18} /></button>
           </div>
           <div className="mobile-app-download-body">
-            <div className="mobile-app-qr-card">
-              {mobileAppQrUrl ? <img src={mobileAppQrUrl} alt="WIAMeet 모바일 접속 QR" /> : <div className="mobile-app-qr-empty">QR 생성 중</div>}
+            <div className="mobile-app-qr-panel">
+              <div className="mobile-app-qr-card">
+                {mobileAppQrUrl ? <img src={mobileAppQrUrl} alt="WIAMeet 모바일 접속 QR" /> : <div className="mobile-app-qr-empty">QR 생성 중</div>}
+              </div>
+              <span>사내 와이파이 연결 필요</span>
             </div>
             <div className="mobile-app-download-copy">
-              <h4>휴대폰 카메라로 QR을 스캔하세요.</h4>
-              <p>사내 와이파이에 연결된 상태에서 모바일 버전이 열립니다. 브라우저 메뉴에서 홈 화면에 추가하면 앱처럼 사용할 수 있습니다.</p>
+              <h4>모바일에서 WIAMeet을 앱처럼 실행하세요.</h4>
+              <p>QR을 스캔하면 모바일 로그인 화면이 열리고, 바로 앱 설치 안내를 확인할 수 있습니다.</p>
+              <div className="mobile-app-step-list">
+                <div><span>1</span><b>QR 스캔</b><small>휴대폰 카메라로 접속</small></div>
+                <div><span>2</span><b>앱 설치</b><small>홈 화면 아이콘 추가</small></div>
+              </div>
+              <div className="mobile-app-note">Android는 설치 버튼을, iPhone은 홈 화면 추가 안내를 로그인 화면에서 제공합니다.</div>
             </div>
           </div>
         </section>
@@ -3972,3 +4169,9 @@ function App() {
 }
 
 createRoot(document.getElementById('root')).render(<App />);
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => undefined);
+  });
+}

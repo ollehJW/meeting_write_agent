@@ -1,0 +1,19 @@
+{
+  "name": "WIAMeet",
+  "short_name": "WIAMeet",
+  "description": "회의 녹음과 회의록 자동 작성 모바일 앱",
+  "start_url": "/mobile",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#eef1f6",
+  "theme_color": "#062983",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/wia-meet-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

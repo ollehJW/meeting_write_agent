@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#062983"/>
+  <path d="M96 154h320v56H96z" fill="#ffffff"/>
+  <path d="M96 244h210v56H96z" fill="#ffffff" opacity=".92"/>
+  <path d="M96 334h260v56H96z" fill="#ffffff" opacity=".82"/>
+  <path d="M322 238h94v94h-94z" fill="#1ba1e8"/>
+  <text x="96" y="118" font-family="Arial, Helvetica, sans-serif" font-size="56" font-weight="900" fill="#ffffff">WIA</text>
+</svg>
