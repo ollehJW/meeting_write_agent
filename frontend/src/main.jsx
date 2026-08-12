@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import QRCode from 'qrcode';
 import { AlertTriangle, BarChart3, Building2, CalendarDays, CheckCircle2, Clock3, Download, FileText, GripVertical, Home, Info, KeyRound, Tags, LogIn, LogOut, Mic2, Pause, Pencil, Play, Plus, Settings, ShieldCheck, Square, Trash2, Trophy, UploadCloud, UserRound, UserPlus, X } from 'lucide-react';
 import './styles.css';
 
@@ -991,6 +992,8 @@ function App() {
   const [meetingInfoOpen, setMeetingInfoOpen] = useState(false);
   const [processGuideOpen, setProcessGuideOpen] = useState(false);
   const [userGuideOpen, setUserGuideOpen] = useState(false);
+  const [mobileAppModalOpen, setMobileAppModalOpen] = useState(false);
+  const [mobileAppQrUrl, setMobileAppQrUrl] = useState('');
   const [isDownloadingReferences, setIsDownloadingReferences] = useState(false);
   const [deletingReportId, setDeletingReportId] = useState('');
   const [reportCompleted, setReportCompleted] = useState(false);
@@ -1027,6 +1030,18 @@ function App() {
     paused: '일시정지',
     stopped: '녹음 완료',
   }[recordingStatus];
+  const mobileAppUrl = useMemo(() => {
+    if (typeof window === 'undefined') return '/mobile';
+    return `${window.location.origin}/mobile`;
+  }, []);
+
+  useEffect(() => {
+    if (!mobileAppModalOpen) return;
+    QRCode.toDataURL(mobileAppUrl, { width: 280, margin: 2, errorCorrectionLevel: 'M' })
+      .then(setMobileAppQrUrl)
+      .catch(() => setMobileAppQrUrl(''));
+  }, [mobileAppModalOpen, mobileAppUrl]);
+
   const recordingHasContent = recordingStatus !== 'idle';
   const selectedCategory = useMemo(() => (
     categories.find((category) => category.category_uuid === selectedCategoryUuid) || null
@@ -2641,7 +2656,10 @@ function App() {
             <button className={`side-item ${currentView === 'accounts' ? 'active' : ''}`} onClick={() => setCurrentView('accounts')}><ShieldCheck size={17} /><span className="side-name">계정 권한</span></button>
           )}
         </nav>
-        <button className="side-item side-guide-item" type="button" onClick={() => setUserGuideOpen(true)}><Info size={17} /><span className="side-name">사용 가이드</span></button>
+        <div className="side-bottom-actions">
+          <button className="side-item side-mobile-app-item" type="button" onClick={() => setMobileAppModalOpen(true)}><Download size={17} /><span className="side-name">모바일 앱 다운로드</span></button>
+          <button className="side-item side-guide-item" type="button" onClick={() => setUserGuideOpen(true)}><Info size={17} /><span className="side-name">사용 가이드</span></button>
+        </div>
         <div className="side-user">
           <div className="avatar">W</div>
           <div className="side-user-info"><b>{authUser.display_name || authUser.username}</b><span>{authUser.role || 'user'}</span></div>
@@ -3658,6 +3676,28 @@ function App() {
                   {index < creationProcessSteps.length - 1 && <div className="process-flow-connector" aria-hidden="true" />}
                 </div>
               ))}
+            </div>
+          </div>
+        </section>
+      )}
+
+      <div className={`process-guide-backdrop ${mobileAppModalOpen ? 'open' : ''}`} onClick={() => setMobileAppModalOpen(false)} />
+      {mobileAppModalOpen && (
+        <section className="mobile-app-download-modal" role="dialog" aria-modal="true" aria-labelledby="mobile-app-download-title">
+          <div className="process-guide-head">
+            <div>
+              <span>Mobile App</span>
+              <h3 id="mobile-app-download-title">모바일 앱 다운로드</h3>
+            </div>
+            <button className="icon-btn" type="button" onClick={() => setMobileAppModalOpen(false)} aria-label="모바일 앱 다운로드 닫기"><X size={18} /></button>
+          </div>
+          <div className="mobile-app-download-body">
+            <div className="mobile-app-qr-card">
+              {mobileAppQrUrl ? <img src={mobileAppQrUrl} alt="WIAMeet 모바일 접속 QR" /> : <div className="mobile-app-qr-empty">QR 생성 중</div>}
+            </div>
+            <div className="mobile-app-download-copy">
+              <h4>휴대폰 카메라로 QR을 스캔하세요.</h4>
+              <p>사내 와이파이에 연결된 상태에서 모바일 버전이 열립니다. 브라우저 메뉴에서 홈 화면에 추가하면 앱처럼 사용할 수 있습니다.</p>
             </div>
           </div>
         </section>
