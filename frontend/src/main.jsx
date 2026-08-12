@@ -677,6 +677,15 @@ function App() {
   const [recordingError, setRecordingError] = useState('');
   const [recordingBars, setRecordingBars] = useState(() => Array(RECORD_BAR_COUNT).fill(6));
   const [confirmClearRecording, setConfirmClearRecording] = useState(false);
+  const [draftSaveOpen, setDraftSaveOpen] = useState(false);
+  const [draftTitle, setDraftTitle] = useState('');
+  const [recordingDrafts, setRecordingDrafts] = useState([]);
+  const [draftPickerOpen, setDraftPickerOpen] = useState(false);
+  const [isSavingDraft, setIsSavingDraft] = useState(false);
+  const [isLoadingDrafts, setIsLoadingDrafts] = useState(false);
+  const [recordingDraftMessage, setRecordingDraftMessage] = useState('');
+  const [recordingDraftError, setRecordingDraftError] = useState('');
+  const [savedDraftAudioKey, setSavedDraftAudioKey] = useState('');
   const [referenceFiles, setReferenceFiles] = useState([]);
   const emptyTimeParts = { period: 'AM', hour: '', minute: '00' };
   const [meetingTitle, setMeetingTitle] = useState('');
@@ -889,6 +898,115 @@ function App() {
     link.remove();
   }
 
+  function audioDraftKey(file = audioFile) {
+    return file ? `${file.name}:${file.size}:${file.lastModified}` : '';
+  }
+
+  function defaultDraftTitle() {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const hour = String(now.getHours()).padStart(2, '0');
+    const minute = String(now.getMinutes()).padStart(2, '0');
+    return `보관 녹음 ${year}-${month}-${day} ${hour}:${minute}`;
+  }
+
+  function formatDurationLabel(seconds) {
+    const duration = formatRecordingDuration(Number(seconds || 0));
+    return `${duration.minutes}:${duration.seconds}`;
+  }
+
+  function openDraftSaveDialog() {
+    if (savedDraftAudioKey && savedDraftAudioKey === audioDraftKey()) return;
+    setDraftTitle(defaultDraftTitle());
+    setRecordingDraftError('');
+    setRecordingDraftMessage('');
+    setDraftSaveOpen(true);
+  }
+
+  async function persistRecordingDraft(titleValue) {
+    if (!audioFile) return false;
+    setIsSavingDraft(true);
+    setRecordingDraftError('');
+    setRecordingDraftMessage('');
+    try {
+      const formData = new FormData();
+      formData.append('audio', audioFile);
+      formData.append('title', titleValue || defaultDraftTitle());
+      formData.append('duration_seconds', String(recordingSeconds || 0));
+      const response = await fetch(`${API_BASE}/api/recording-drafts`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: formData,
+      });
+      if (response.status === 401) {
+        handleExpiredSession();
+        return false;
+      }
+      if (!response.ok) throw await apiError(response, '녹음 보관에 실패했습니다.');
+      setSavedDraftAudioKey(audioDraftKey());
+      setRecordingDraftMessage('녹음을 보관했습니다. 보관된 녹음은 7일 간 유지됩니다.');
+      await loadRecordingDrafts();
+      return true;
+    } catch (err) {
+      setRecordingDraftError(err.message);
+      return false;
+    } finally {
+      setIsSavingDraft(false);
+    }
+  }
+
+  async function saveRecordingDraft(event) {
+    event.preventDefault();
+    const saved = await persistRecordingDraft(draftTitle);
+    if (saved) setDraftSaveOpen(false);
+  }
+
+  async function loadRecordingDrafts() {
+    setIsLoadingDrafts(true);
+    setRecordingDraftError('');
+    try {
+      const response = await fetch(`${API_BASE}/api/recording-drafts`, { headers: authHeaders() });
+      if (response.status === 401) {
+        handleExpiredSession();
+        return;
+      }
+      if (!response.ok) throw await apiError(response, '보관 녹음 목록을 불러오지 못했습니다.');
+      const data = await response.json();
+      setRecordingDrafts(data.drafts || []);
+    } catch (err) {
+      setRecordingDraftError(err.message);
+    } finally {
+      setIsLoadingDrafts(false);
+    }
+  }
+
+  async function openDraftPicker() {
+    setDraftPickerOpen(true);
+    await loadRecordingDrafts();
+  }
+
+  async function useRecordingDraft(draft) {
+    setRecordingDraftError('');
+    try {
+      const response = await fetch(`${API_BASE}/api/recording-drafts/${draft.draft_uuid}/audio`, { headers: authHeaders() });
+      if (response.status === 401) {
+        handleExpiredSession();
+        return;
+      }
+      if (!response.ok) throw await apiError(response, '보관 녹음을 불러오지 못했습니다.');
+      const blob = await response.blob();
+      const file = new File([blob], `${draft.title || '보관 녹음'}.webm`, { type: blob.type || 'audio/webm' });
+      setAudioFile(file);
+      setSavedDraftAudioKey('');
+      setDraftPickerOpen(false);
+      setRecordingDraftMessage(`보관 녹음 "${draft.title}"을 불러왔습니다.`);
+    } catch (err) {
+      setRecordingDraftError(err.message);
+    }
+  }
+
   async function startBrowserRecording() {
     if (!recorderSupported) {
       setRecordingError('이 브라우저에서는 녹음을 지원하지 않습니다. Chrome 또는 Edge 최신 버전을 사용하세요.');
@@ -896,6 +1014,9 @@ function App() {
     }
 
     setRecordingError('');
+    setRecordingDraftError('');
+    setRecordingDraftMessage('');
+    setSavedDraftAudioKey('');
     setConfirmClearRecording(false);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -979,6 +1100,9 @@ function App() {
     setAudioFile(null);
     setRecordingSeconds(0);
     setRecordingError('');
+    setRecordingDraftError('');
+    setRecordingDraftMessage('');
+    setSavedDraftAudioKey('');
     setIsRecordingPaused(false);
     setConfirmClearRecording(false);
   }
@@ -989,8 +1113,12 @@ function App() {
     setCurrentView('record');
   }
 
-  function useRecordedAudioForMeetingForm() {
+  async function useRecordedAudioForMeetingForm() {
     setConfirmClearRecording(false);
+    if (audioFile && savedDraftAudioKey !== audioDraftKey()) {
+      const saved = await persistRecordingDraft(defaultDraftTitle());
+      if (!saved) return;
+    }
     setCurrentView('create');
   }
 
@@ -2281,14 +2409,20 @@ function App() {
                       <b>{audioFile.name}</b>
                     </div>
                     <audio src={audioUrl} controls preload="metadata" />
-                    <div className="record-preview-actions">
-                      <button className="primary-btn" type="button" onClick={useRecordedAudioForMeetingForm}>
-                        <FileText size={16} />회의록 생성으로 이동
+                    <div className="record-preview-actions three">
+                      <button className="primary-btn" type="button" onClick={useRecordedAudioForMeetingForm} disabled={isSavingDraft}>
+                        {isSavingDraft ? <span className="btn-spinner" aria-hidden="true"></span> : <FileText size={16} />}
+                        {isSavingDraft ? '녹음 보관 중' : '회의록 생성으로 이동'}
+                      </button>
+                      <button className="line-btn" type="button" onClick={openDraftSaveDialog} disabled={savedDraftAudioKey === audioDraftKey()}>
+                        <CheckCircle2 size={16} />{savedDraftAudioKey === audioDraftKey() ? '보관 완료' : '녹음 보관'}
                       </button>
                       <button className="line-btn" type="button" onClick={downloadRecordedAudio}>
                         <Download size={16} />다운로드
                       </button>
                     </div>
+                    {recordingDraftMessage && <div className="record-draft-message">{recordingDraftMessage}</div>}
+                    {recordingDraftError && <div className="record-draft-error">{recordingDraftError}</div>}
                   </div>
                 )}
               </div>
@@ -2523,7 +2657,9 @@ function App() {
 
                   <div className="upload-row">
                     <div className="upload-col">
-                      <label className="field-label">회의 녹음</label>
+                      <div className="field-label-row">
+                        <label className="field-label">회의 녹음</label>
+                      </div>
                       <button className="record-upload-card" type="button" onClick={openRecorderFromMeetingForm}>
                         <span className="record-upload-icon"><Mic2 size={24} /></span>
                         <b>회의 녹음</b>
@@ -2532,7 +2668,10 @@ function App() {
                     </div>
 
                     <div className="upload-col">
-                      <label className="field-label">회의 녹음 파일 <span className="required">필수</span></label>
+                      <div className="field-label-row">
+                        <label className="field-label">회의 녹음 파일 <span className="required">필수</span></label>
+                        <button className="team-add-all-btn" type="button" onClick={openDraftPicker}>보관 녹음 불러오기</button>
+                      </div>
                       <label className="upload-box">
                         <input
                           type="file"
@@ -2546,7 +2685,9 @@ function App() {
                     </div>
 
                     <div className="upload-col">
-                      <label className="field-label">회의 참고자료 <span className="optional">선택</span></label>
+                      <div className="field-label-row">
+                        <label className="field-label">회의 참고자료 <span className="optional">선택</span></label>
+                      </div>
                       <label className="upload-box">
                         <input
                           type="file"
@@ -3276,6 +3417,69 @@ function App() {
         </div>
       </aside>
     </div>
+    {draftSaveOpen && (
+      <div className="draft-modal-backdrop open" onClick={() => setDraftSaveOpen(false)}>
+        <form className="draft-modal" onSubmit={saveRecordingDraft} onClick={(event) => event.stopPropagation()}>
+          <div className="draft-modal-head">
+            <div>
+              <span>Recording Archive</span>
+              <h3>녹음 보관</h3>
+            </div>
+            <button className="icon-btn" type="button" onClick={() => setDraftSaveOpen(false)}><X size={18} /></button>
+          </div>
+          <div className="draft-warning-box">보관된 녹음은 7일 간 유지됩니다.</div>
+          <label className="login-field">
+            <span>제목</span>
+            <input value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} placeholder="녹음 보관 제목" />
+          </label>
+          {recordingDraftError && <div className="login-error">{recordingDraftError}</div>}
+          <div className="draft-modal-actions">
+            <button className="line-btn" type="button" onClick={() => setDraftSaveOpen(false)}>취소</button>
+            <button className="primary-btn" type="submit" disabled={isSavingDraft || !draftTitle.trim()}>
+              {isSavingDraft && <span className="btn-spinner" aria-hidden="true"></span>}
+              {isSavingDraft ? '저장 중' : '저장'}
+            </button>
+          </div>
+        </form>
+      </div>
+    )}
+
+    {draftPickerOpen && (
+      <div className="draft-modal-backdrop open" onClick={() => setDraftPickerOpen(false)}>
+        <section className="draft-modal wide" onClick={(event) => event.stopPropagation()}>
+          <div className="draft-modal-head">
+            <div>
+              <span>Recording Archives</span>
+              <h3>보관 녹음 불러오기</h3>
+              <p>보관된 녹음 파일을 회의록 작성에 연결합니다.</p>
+            </div>
+            <button className="icon-btn" type="button" onClick={() => setDraftPickerOpen(false)}><X size={18} /></button>
+          </div>
+          {recordingDraftError && <div className="login-error">{recordingDraftError}</div>}
+          <div className="draft-list">
+            {isLoadingDrafts && <div className="account-empty">보관 녹음 목록을 불러오는 중입니다.</div>}
+            {!isLoadingDrafts && recordingDrafts.map((draft) => (
+              <article className={draft.available ? 'draft-list-item' : 'draft-list-item disabled'} key={draft.draft_uuid}>
+                <div className="draft-list-main">
+                  <div>
+                    <b>{draft.title}</b>
+                    <small>{formatDurationLabel(draft.duration_seconds)} · {String(draft.created_at || '').slice(0, 16).replace('T', ' ')}</small>
+                  </div>
+                  <button className="team-add-all-btn" type="button" onClick={() => useRecordingDraft(draft)} disabled={!draft.available}>불러오기</button>
+                </div>
+                {draft.available ? (
+                  <audio className="draft-preview-audio" src={authenticatedUrl(`/api/recording-drafts/${draft.draft_uuid}/audio`)} controls preload="metadata" />
+                ) : (
+                  <div className="draft-preview-missing">파일을 찾을 수 없습니다.</div>
+                )}
+              </article>
+            ))}
+            {!isLoadingDrafts && recordingDrafts.length === 0 && <div className="account-empty">보관된 녹음이 없습니다.</div>}
+          </div>
+        </section>
+      </div>
+    )}
+
     {passwordSetupModal}
     </>
   );

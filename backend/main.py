@@ -27,9 +27,11 @@ from .write import build_prompt, format_transcript, generate_report
 BASE_DIR = Path(__file__).resolve().parent.parent
 JOB_ROOT = BASE_DIR / "jobs"
 WORK_ROOT = BASE_DIR / ".jobs_work"
+BACKEND_WORKSPACE_ROOT = BASE_DIR / "backend" / "workspace"
 APP_DB_PATH = BASE_DIR / "backend" / "app.db"
 JOB_ROOT.mkdir(exist_ok=True)
 WORK_ROOT.mkdir(exist_ok=True)
+BACKEND_WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
 KST = ZoneInfo("Asia/Seoul")
 WORK_CLEANUP_HOUR = 5
 INITIAL_PASSWORD = "wia1234!"
@@ -304,6 +306,61 @@ def create_meeting_reports_table(conn, table_name: str = "meeting_reports"):
     )
 
 
+def create_recording_drafts_table(conn, table_name: str = "recording_drafts"):
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
+            draft_uuid TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            storage_path TEXT NOT NULL,
+            duration_seconds INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(user_uuid)
+        )
+        """
+    )
+
+
+def migrate_recording_drafts_table(conn):
+    if not table_exists(conn, "recording_drafts"):
+        create_recording_drafts_table(conn)
+        return
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(recording_drafts)").fetchall()}
+    required = {"draft_uuid", "user_id", "title", "storage_path", "duration_seconds", "created_at"}
+    if required.issubset(columns) and "original_filename" not in columns:
+        return
+
+    rows = conn.execute("SELECT * FROM recording_drafts").fetchall()
+    conn.execute("DROP TABLE IF EXISTS recording_drafts_new")
+    create_recording_drafts_table(conn, "recording_drafts_new")
+    for row in rows:
+        keys = row.keys()
+        draft_uuid = row["draft_uuid"] if "draft_uuid" in keys and row["draft_uuid"] else uuid.uuid4().hex
+        user_id = row["user_id"] if "user_id" in keys else row["user_uuid"] if "user_uuid" in keys else ""
+        storage_path = row["storage_path"] if "storage_path" in keys else ""
+        if not user_id or not storage_path:
+            continue
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO recording_drafts_new (
+                draft_uuid, user_id, title, storage_path, duration_seconds, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                draft_uuid,
+                user_id,
+                row["title"] if "title" in keys and row["title"] else "임시 녹음",
+                storage_path,
+                row["duration_seconds"] if "duration_seconds" in keys else 0,
+                row["created_at"] if "created_at" in keys and row["created_at"] else datetime.now(KST).isoformat(),
+            ),
+        )
+    conn.execute("DROP TABLE recording_drafts")
+    conn.execute("ALTER TABLE recording_drafts_new RENAME TO recording_drafts")
+
+
 def migrate_meeting_reports_table(conn):
     if not table_exists(conn, "meeting_reports"):
         create_meeting_reports_table(conn)
@@ -358,6 +415,7 @@ def init_app_db():
         migrate_users_member_table(conn)
         migrate_users_category_table(conn)
         migrate_meeting_reports_table(conn)
+        migrate_recording_drafts_table(conn)
         conn.execute("PRAGMA foreign_keys = ON")
 
         user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -914,6 +972,108 @@ def delete_category(category_uuid: str, authorization: str | None = Header(defau
     if cursor.rowcount == 0:
         raise HTTPException(status_code=404, detail="Category not found.")
     return {"deleted": True}
+
+
+@app.get("/api/recording-drafts")
+def list_recording_drafts(authorization: str | None = Header(default=None)):
+    user = get_session_user(authorization)
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT draft_uuid, title, storage_path, duration_seconds, created_at
+            FROM recording_drafts
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            """,
+            (user["user_uuid"],),
+        ).fetchall()
+    return {
+        "drafts": [
+            {
+                "draft_uuid": row["draft_uuid"],
+                "title": row["title"],
+                "duration_seconds": row["duration_seconds"],
+                "created_at": row["created_at"],
+                "available": Path(row["storage_path"]).exists(),
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/api/recording-drafts")
+def create_recording_draft(
+    audio: UploadFile = File(...),
+    title: str = Form(""),
+    duration_seconds: int = Form(0),
+    authorization: str | None = Header(default=None),
+):
+    user = get_session_user(authorization)
+    clean_title = title.strip()
+    if not clean_title:
+        clean_title = "임시 녹음 " + datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+    if not audio.filename:
+        raise HTTPException(status_code=400, detail="No audio file uploaded.")
+
+    draft_uuid = uuid.uuid4().hex
+    draft_dir = BACKEND_WORKSPACE_ROOT / draft_uuid
+    draft_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(Path(audio.filename).name).suffix.lower() or ".webm"
+    storage_path = draft_dir / f"draft{suffix}"
+    with storage_path.open("wb") as f:
+        shutil.copyfileobj(audio.file, f)
+
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO recording_drafts (
+                draft_uuid, user_id, title, storage_path, duration_seconds, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                draft_uuid,
+                user["user_uuid"],
+                clean_title,
+                str(storage_path),
+                max(0, int(duration_seconds or 0)),
+                datetime.now(KST).isoformat(),
+            ),
+        )
+        conn.commit()
+
+    return {
+        "draft": {
+            "draft_uuid": draft_uuid,
+            "title": clean_title,
+            "duration_seconds": max(0, int(duration_seconds or 0)),
+            "created_at": datetime.now(KST).isoformat(),
+        }
+    }
+
+
+@app.get("/api/recording-drafts/{draft_uuid}/audio")
+def get_recording_draft_audio(
+    draft_uuid: str,
+    authorization: str | None = Header(default=None),
+    token: str | None = Query(default=None),
+):
+    user = get_session_user(authorization, token)
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT title, storage_path
+            FROM recording_drafts
+            WHERE draft_uuid = ? AND user_id = ?
+            """,
+            (draft_uuid, user["user_uuid"]),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Recording draft not found.")
+    path = Path(row["storage_path"])
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Recording draft file not found.")
+    filename = f"{row['title']}{path.suffix or '.webm'}"
+    return FileResponse(path, filename=filename)
 
 
 @app.post("/api/jobs", response_model=JobStatus)
