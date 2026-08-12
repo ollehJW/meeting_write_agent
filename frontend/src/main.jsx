@@ -23,7 +23,9 @@ const USER_GUIDE_MARKDOWN = `# 사용 가이드
 
 - 녹음 시작 후 일시정지, 재개, 종료가 가능합니다.
 - 녹음이 끝나면 브라우저가 만든 원본 오디오 파일이 생성됩니다.
-- **회의록 생성으로 이동**을 누르면 녹음 파일이 생성 화면에 자동으로 연결됩니다.
+- **녹음 보관**을 누르면 제목을 입력해 녹음을 서버에 보관할 수 있으며, 보관된 녹음은 7일 간 유지됩니다.
+- **회의록 생성으로 이동**을 누르면 녹음이 기본 제목으로 자동 보관된 뒤 생성 화면에 연결됩니다. 이미 보관 완료된 녹음은 중복 보관하지 않습니다.
+- 회의록 생성 화면의 **보관 녹음 불러오기**에서 보관된 녹음을 미리 재생해보고 회의 녹음 파일로 연결할 수 있습니다.
 - PC 화면에서는 **다운로드**로 녹음 파일을 저장할 수 있으며, 모바일 화면은 보안 정책에 따라 녹음 파일 다운로드를 제공하지 않습니다.
 
 ## 3. 회의록 생성 프로세스
@@ -242,6 +244,11 @@ function MobileRecordPage({
   onStop,
   onClear,
   onUseForCreate,
+  onArchive,
+  archiveSaved,
+  isArchiving,
+  archiveMessage,
+  archiveError,
 }) {
   const duration = formatRecordingDuration(recordingSeconds);
   return (
@@ -306,9 +313,17 @@ function MobileRecordPage({
           </div>
           <audio className="mobile-audio-player" src={audioUrl} controls preload="metadata" />
           <div className="mobile-stack-actions">
-            <button className="mobile-primary-action dark" type="button" onClick={onUseForCreate}><FileText size={18} />회의록 생성으로 이동</button>
+            <button className="mobile-primary-action dark" type="button" onClick={onUseForCreate} disabled={isArchiving}>
+              {isArchiving ? <span className="btn-spinner" aria-hidden="true"></span> : <FileText size={18} />}
+              {isArchiving ? '녹음 보관 중' : '회의록 작성으로 이동'}
+            </button>
+            <button className="mobile-secondary-action bordered" type="button" onClick={onArchive} disabled={archiveSaved || isArchiving}>
+              <CheckCircle2 size={18} />{archiveSaved ? '보관 완료' : '녹음 보관'}
+            </button>
             <button className="mobile-secondary-action bordered danger-text" type="button" onClick={onClear}><Trash2 size={18} />삭제</button>
           </div>
+          {archiveMessage && <div className="mobile-info-box">{archiveMessage}</div>}
+          {archiveError && <div className="mobile-error-box">{archiveError}</div>}
         </section>
       )}
     </>
@@ -342,6 +357,8 @@ function MobileCreatePage({
   canStart,
   onUploadAndRun,
   onOpenRecorder,
+  onOpenDraftPicker,
+  onUnlinkAudio,
 }) {
   const [organizationText, setOrganizationText] = useState('');
   const [participantText, setParticipantText] = useState('');
@@ -434,18 +451,28 @@ function MobileCreatePage({
       <section className="mobile-form-card">
         {audioFile ? (
           <div className="mobile-record-linked-card">
-            <CheckCircle2 size={26} />
-            <div>
-              <b>회의 녹음 연동 완료</b>
-              <span>{audioFile.name}</span>
+            <div className="mobile-record-linked-main">
+              <CheckCircle2 size={26} />
+              <div>
+                <b>회의 녹음 연동 완료</b>
+                <span>{audioFile.name}</span>
+              </div>
             </div>
+            <button className="mobile-record-unlink-btn" type="button" onClick={onUnlinkAudio}>연동 해제</button>
           </div>
         ) : (
-          <button className="mobile-record-link-button" type="button" onClick={onOpenRecorder}>
-            <Mic2 size={28} />
-            <b>회의 녹음으로 이동</b>
-            <span>녹음 종료 후 회의록 작성에 바로 연결됩니다.</span>
-          </button>
+          <div className="mobile-record-link-grid">
+            <button className="mobile-record-link-button" type="button" onClick={onOpenRecorder}>
+              <Mic2 size={28} />
+              <b>회의 녹음으로 이동</b>
+              <span>녹음 종료 후 회의록 작성에 바로 연결됩니다.</span>
+            </button>
+            <button className="mobile-record-link-button secondary" type="button" onClick={onOpenDraftPicker}>
+              <FileText size={28} />
+              <b>보관 녹음 불러오기</b>
+              <span>보관된 녹음을 재생해보고 연결합니다.</span>
+            </button>
+          </div>
         )}
         <label className="mobile-upload-tile secondary">
           <input type="file" accept=".ppt,.pptx,.pdf" multiple onChange={(event) => setReferenceFiles(Array.from(event.target.files || []))} />
@@ -671,6 +698,9 @@ function App() {
   const [requiredPasswordError, setRequiredPasswordError] = useState('');
   const [isUpdatingRequiredPassword, setIsUpdatingRequiredPassword] = useState(false);
   const [audioFile, setAudioFile] = useState(null);
+  const [pcCreateAudioFile, setPcCreateAudioFile] = useState(null);
+  const [mobileCreateAudioFile, setMobileCreateAudioFile] = useState(null);
+  const [mobileCreateAudioLinked, setMobileCreateAudioLinked] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isRecordingPaused, setIsRecordingPaused] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
@@ -850,7 +880,8 @@ function App() {
       recentReports,
     };
   }, [loungeReports, members, homeCategoryMonth]);
-  const canStart = audioFile && meetingTitle.trim() && selectedCategoryUuid && meetingPurpose.trim() && meetingDate && meetingStartTime && meetingEndTime && meetingOrganizations.length > 0 && participants.length > 0 && (!job || job.status === 'failed' || job.status === 'completed');
+  const activeMeetingAudioFile = isMobileRoute && mobileView === 'create' ? (mobileCreateAudioLinked ? mobileCreateAudioFile : null) : pcCreateAudioFile;
+  const canStart = activeMeetingAudioFile && meetingTitle.trim() && selectedCategoryUuid && meetingPurpose.trim() && meetingDate && meetingStartTime && meetingEndTime && meetingOrganizations.length > 0 && participants.length > 0 && (!job || job.status === 'failed' || job.status === 'completed');
 
   const currentKstMonth = useMemo(() => formatMonthKey(getKstToday()), []);
   const canMoveHomeCategoryMonthNext = homeCategoryMonth < currentKstMonth;
@@ -998,7 +1029,14 @@ function App() {
       if (!response.ok) throw await apiError(response, '보관 녹음을 불러오지 못했습니다.');
       const blob = await response.blob();
       const file = new File([blob], `${draft.title || '보관 녹음'}.webm`, { type: blob.type || 'audio/webm' });
-      setAudioFile(file);
+      if (isMobileRoute && mobileView === 'create') {
+        setMobileCreateAudioFile(file);
+        setMobileCreateAudioLinked(true);
+      } else {
+        setPcCreateAudioFile(file);
+        setMobileCreateAudioFile(null);
+        setMobileCreateAudioLinked(false);
+      }
       setSavedDraftAudioKey('');
       setDraftPickerOpen(false);
       setRecordingDraftMessage(`보관 녹음 "${draft.title}"을 불러왔습니다.`);
@@ -1017,12 +1055,17 @@ function App() {
     setRecordingDraftError('');
     setRecordingDraftMessage('');
     setSavedDraftAudioKey('');
+    setMobileCreateAudioFile(null);
+    setMobileCreateAudioLinked(false);
     setConfirmClearRecording(false);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mimeType = preferredAudioMimeType();
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       setAudioFile(null);
+      setPcCreateAudioFile(null);
+      setMobileCreateAudioFile(null);
+      setMobileCreateAudioLinked(false);
       recordingChunksRef.current = [];
       mediaStreamRef.current = stream;
       mediaRecorderRef.current = recorder;
@@ -1037,6 +1080,7 @@ function App() {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
         const file = new File([blob], `meeting-recording-${timestamp}.${extension}`, { type: finalMimeType });
         setAudioFile(file);
+        setMobileCreateAudioLinked(false);
         stream.getTracks().forEach((track) => track.stop());
         mediaStreamRef.current = null;
         mediaRecorderRef.current = null;
@@ -1098,6 +1142,9 @@ function App() {
   function clearRecordedAudio() {
     if (isRecording) stopBrowserRecording();
     setAudioFile(null);
+    setPcCreateAudioFile(null);
+    setMobileCreateAudioFile(null);
+    setMobileCreateAudioLinked(false);
     setRecordingSeconds(0);
     setRecordingError('');
     setRecordingDraftError('');
@@ -1119,7 +1166,14 @@ function App() {
       const saved = await persistRecordingDraft(defaultDraftTitle());
       if (!saved) return;
     }
-    setCurrentView('create');
+    if (isMobileRoute) {
+      setMobileCreateAudioFile(audioFile);
+      setMobileCreateAudioLinked(true);
+      navigateMobile('create');
+    } else {
+      setPcCreateAudioFile(audioFile);
+      setCurrentView('create');
+    }
   }
 
   function defaultMeetingOrganizations(user = authUser) {
@@ -1128,6 +1182,9 @@ function App() {
 
   function resetMeetingForm(user = authUser) {
     setAudioFile(null);
+    setPcCreateAudioFile(null);
+    setMobileCreateAudioFile(null);
+    setMobileCreateAudioLinked(false);
     setReferenceFiles([]);
     setMeetingTitle('');
     setSelectedCategoryUuid('');
@@ -1844,7 +1901,8 @@ function App() {
   }
 
   async function uploadAndRun() {
-    if (!audioFile) return;
+    const uploadAudioFile = activeMeetingAudioFile;
+    if (!uploadAudioFile) return;
     setError('');
     setResult(null);
     setMappedSentences([]);
@@ -1866,7 +1924,7 @@ function App() {
     window.requestAnimationFrame(() => processRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
 
     const formData = new FormData();
-    formData.append('audio', audioFile);
+    formData.append('audio', uploadAudioFile);
     for (const referenceFile of referenceFiles) {
       formData.append('references', referenceFile);
     }
@@ -2120,7 +2178,12 @@ function App() {
           onPauseResume={pauseOrResumeBrowserRecording}
           onStop={stopBrowserRecording}
           onClear={clearRecordedAudio}
-          onUseForCreate={() => navigateMobile('create')}
+          onUseForCreate={useRecordedAudioForMeetingForm}
+          onArchive={openDraftSaveDialog}
+          archiveSaved={savedDraftAudioKey === audioDraftKey()}
+          isArchiving={isSavingDraft}
+          archiveMessage={recordingDraftMessage}
+          archiveError={recordingDraftError}
         />
       );
     } else if (mobileView === 'create') {
@@ -2144,14 +2207,16 @@ function App() {
           members={members}
           participants={participants}
           setParticipants={setParticipants}
-          audioFile={audioFile}
+          audioFile={mobileCreateAudioLinked ? mobileCreateAudioFile : null}
           referenceFiles={referenceFiles}
           setReferenceFiles={setReferenceFiles}
           job={job}
           error={error}
-          canStart={canStart}
+          canStart={mobileCreateAudioLinked && canStart}
           onUploadAndRun={uploadAndRun}
           onOpenRecorder={() => navigateMobile('record')}
+          onOpenDraftPicker={openDraftPicker}
+          onUnlinkAudio={() => { setMobileCreateAudioLinked(false); setMobileCreateAudioFile(null); }}
         />
       );
     } else if (mobileView === 'lounge') {
@@ -2180,6 +2245,69 @@ function App() {
     return (
       <>
         <MobileMeetApp current={mobileView} onNavigate={navigateMobile}>{mobilePage}</MobileMeetApp>
+    {draftSaveOpen && (
+      <div className="draft-modal-backdrop open" onClick={() => setDraftSaveOpen(false)}>
+        <form className="draft-modal" onSubmit={saveRecordingDraft} onClick={(event) => event.stopPropagation()}>
+          <div className="draft-modal-head">
+            <div>
+              <span>Recording Archive</span>
+              <h3>녹음 보관</h3>
+            </div>
+            <button className="icon-btn" type="button" onClick={() => setDraftSaveOpen(false)}><X size={18} /></button>
+          </div>
+          <div className="draft-warning-box">보관된 녹음은 7일 간 유지됩니다.</div>
+          <label className="login-field">
+            <span>제목</span>
+            <input value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} placeholder="녹음 보관 제목" />
+          </label>
+          {recordingDraftError && <div className="login-error">{recordingDraftError}</div>}
+          <div className="draft-modal-actions">
+            <button className="line-btn" type="button" onClick={() => setDraftSaveOpen(false)}>취소</button>
+            <button className="primary-btn" type="submit" disabled={isSavingDraft || !draftTitle.trim()}>
+              {isSavingDraft && <span className="btn-spinner" aria-hidden="true"></span>}
+              {isSavingDraft ? '저장 중' : '저장'}
+            </button>
+          </div>
+        </form>
+      </div>
+    )}
+
+    {draftPickerOpen && (
+      <div className="draft-modal-backdrop open" onClick={() => setDraftPickerOpen(false)}>
+        <section className="draft-modal wide" onClick={(event) => event.stopPropagation()}>
+          <div className="draft-modal-head">
+            <div>
+              <span>Recording Archives</span>
+              <h3>보관 녹음 불러오기</h3>
+              <p>보관된 녹음 파일을 회의록 작성에 연결합니다.</p>
+            </div>
+            <button className="icon-btn" type="button" onClick={() => setDraftPickerOpen(false)}><X size={18} /></button>
+          </div>
+          {recordingDraftError && <div className="login-error">{recordingDraftError}</div>}
+          <div className="draft-list">
+            {isLoadingDrafts && <div className="account-empty">보관 녹음 목록을 불러오는 중입니다.</div>}
+            {!isLoadingDrafts && recordingDrafts.map((draft) => (
+              <article className={draft.available ? 'draft-list-item' : 'draft-list-item disabled'} key={draft.draft_uuid}>
+                <div className="draft-list-main">
+                  <div>
+                    <b>{draft.title}</b>
+                    <small>{formatDurationLabel(draft.duration_seconds)} · {String(draft.created_at || '').slice(0, 16).replace('T', ' ')}</small>
+                  </div>
+                </div>
+                {draft.available ? (
+                  <audio className="draft-preview-audio" src={authenticatedUrl(`/api/recording-drafts/${draft.draft_uuid}/audio`)} controls preload="metadata" />
+                ) : (
+                  <div className="draft-preview-missing">파일을 찾을 수 없습니다.</div>
+                )}
+                <button className="draft-load-btn" type="button" onClick={() => useRecordingDraft(draft)} disabled={!draft.available}>이 녹음 불러오기</button>
+              </article>
+            ))}
+            {!isLoadingDrafts && recordingDrafts.length === 0 && <div className="account-empty">보관된 녹음이 없습니다.</div>}
+          </div>
+        </section>
+      </div>
+    )}
+
         {passwordSetupModal}
       </>
     );
@@ -2676,10 +2804,10 @@ function App() {
                         <input
                           type="file"
                           accept="audio/*,.webm,.m4a,.wav,.mp3,.aac,.flac,.ogg"
-                          onChange={(event) => setAudioFile(event.target.files?.[0] || null)}
+                          onChange={(event) => setPcCreateAudioFile(event.target.files?.[0] || null)}
                         />
                         <UploadCloud className="upload-icon" size={34} />
-                        <b>{audioFile ? audioFile.name : '녹음 파일을 선택하거나 끌어오세요'}</b>
+                        <b>{pcCreateAudioFile ? pcCreateAudioFile.name : '녹음 파일을 선택하거나 끌어오세요'}</b>
                         <span>webm, m4a, wav, mp3, aac, flac, ogg 파일을 업로드할 수 있습니다.</span>
                       </label>
                     </div>
@@ -3465,13 +3593,13 @@ function App() {
                     <b>{draft.title}</b>
                     <small>{formatDurationLabel(draft.duration_seconds)} · {String(draft.created_at || '').slice(0, 16).replace('T', ' ')}</small>
                   </div>
-                  <button className="team-add-all-btn" type="button" onClick={() => useRecordingDraft(draft)} disabled={!draft.available}>불러오기</button>
                 </div>
                 {draft.available ? (
                   <audio className="draft-preview-audio" src={authenticatedUrl(`/api/recording-drafts/${draft.draft_uuid}/audio`)} controls preload="metadata" />
                 ) : (
                   <div className="draft-preview-missing">파일을 찾을 수 없습니다.</div>
                 )}
+                <button className="draft-load-btn" type="button" onClick={() => useRecordingDraft(draft)} disabled={!draft.available}>이 녹음 불러오기</button>
               </article>
             ))}
             {!isLoadingDrafts && recordingDrafts.length === 0 && <div className="account-empty">보관된 녹음이 없습니다.</div>}
