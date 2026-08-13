@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 from typing import Literal
 from urllib.parse import parse_qs, quote, urlparse
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi import Cookie, FastAPI, File, Form, Header, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -39,13 +39,17 @@ BACKEND_WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
 KST = ZoneInfo("Asia/Seoul")
 WORK_CLEANUP_HOUR = 5
 RECORDING_DRAFT_RETENTION_DAYS = 7
-INITIAL_PASSWORD = "wia1234!"
+SESSION_TTL_HOURS = 12
+MEDIA_SESSION_TTL_HOURS = 2
+MEDIA_SESSION_COOKIE = "wiameet_media_session"
 CONFLUENCE_TOKEN_PREFIX = "fernet:"
 
 cleanup_stop_event = Event()
 cleanup_thread: Thread | None = None
 sessions: dict[str, dict] = {}
 sessions_lock = Lock()
+media_sessions: dict[str, dict] = {}
+media_sessions_lock = Lock()
 
 
 def hash_password(password: str, salt: str | None = None):
@@ -62,6 +66,26 @@ def hash_password(password: str, salt: str | None = None):
 def verify_password(password: str, salt: str, password_hash: str):
     _, digest = hash_password(password, salt)
     return secrets.compare_digest(digest, password_hash)
+
+
+def hash_session_token(token: str):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def generate_temporary_password():
+    return secrets.token_urlsafe(12)
+
+
+def parse_session_datetime(value: str | None):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=KST)
+    return parsed.astimezone(KST)
 
 
 def get_confluence_secret_key():
@@ -145,9 +169,10 @@ def create_auth_sessions_table(conn, table_name: str = "auth_sessions"):
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {table_name} (
-            token TEXT PRIMARY KEY,
+            token_hash TEXT PRIMARY KEY,
             user_uuid TEXT NOT NULL,
             created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
             FOREIGN KEY(user_uuid) REFERENCES users(user_uuid)
         )
         """
@@ -271,36 +296,52 @@ def migrate_users_table(conn):
 def migrate_auth_sessions_table(conn, id_to_uuid: dict[int, str] | None = None, target_table: str = "auth_sessions"):
     id_to_uuid = id_to_uuid or {}
     should_replace_auth_sessions = target_table == "auth_sessions"
+    source_exists = table_exists(conn, "auth_sessions")
+    source_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(auth_sessions)").fetchall()
+    } if source_exists else set()
+    required_columns = {"token_hash", "user_uuid", "created_at", "expires_at"}
+
+    if should_replace_auth_sessions and required_columns.issubset(source_columns):
+        return
+
     if target_table != "auth_sessions" and table_exists(conn, target_table):
         conn.execute(f"DROP TABLE {target_table}")
-    create_auth_sessions_table(conn, target_table)
-    if not table_exists(conn, "auth_sessions"):
-        return
 
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(auth_sessions)").fetchall()}
-    if target_table == "auth_sessions" and "user_id" not in columns and "user_uuid" in columns:
-        return
-
-    rows = conn.execute("SELECT * FROM auth_sessions").fetchall()
-    if target_table == "auth_sessions":
+    destination_table = target_table
+    if should_replace_auth_sessions:
         conn.execute("DROP TABLE IF EXISTS auth_sessions_new")
-        create_auth_sessions_table(conn, "auth_sessions_new")
-        target_table = "auth_sessions_new"
-    for row in rows:
-        user_uuid = None
-        if "user_uuid" in row.keys():
-            user_uuid = row["user_uuid"]
-        elif "user_id" in row.keys():
-            user_uuid = id_to_uuid.get(row["user_id"])
-        if not user_uuid:
-            continue
-        conn.execute(
-            f"INSERT OR IGNORE INTO {target_table} (token, user_uuid, created_at) VALUES (?, ?, ?)",
-            (row["token"], user_uuid, row["created_at"]),
-        )
+        destination_table = "auth_sessions_new"
+    create_auth_sessions_table(conn, destination_table)
+
+    if source_exists:
+        rows = conn.execute("SELECT * FROM auth_sessions").fetchall()
+        for row in rows:
+            keys = set(row.keys())
+            user_uuid = row["user_uuid"] if "user_uuid" in keys else id_to_uuid.get(row["user_id"])
+            if not user_uuid:
+                continue
+
+            raw_token = row["token"] if "token" in keys else None
+            token_hash = row["token_hash"] if "token_hash" in keys else hash_session_token(raw_token)
+            created_at = parse_session_datetime(row["created_at"]) or datetime.now(KST)
+            expires_at = (
+                parse_session_datetime(row["expires_at"])
+                if "expires_at" in keys
+                else created_at + timedelta(hours=SESSION_TTL_HOURS)
+            )
+            conn.execute(
+                f"""
+                INSERT OR IGNORE INTO {destination_table}
+                    (token_hash, user_uuid, created_at, expires_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (token_hash, user_uuid, created_at.isoformat(), expires_at.isoformat()),
+            )
 
     if should_replace_auth_sessions:
-        conn.execute("DROP TABLE auth_sessions")
+        if source_exists:
+            conn.execute("DROP TABLE auth_sessions")
         conn.execute("ALTER TABLE auth_sessions_new RENAME TO auth_sessions")
 
 
@@ -572,8 +613,12 @@ def init_app_db():
 
         user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if user_count == 0:
-            default_username = os.getenv("WIAMEET_ADMIN_USERNAME", "admin")
-            default_password = os.getenv("WIAMEET_ADMIN_PASSWORD", INITIAL_PASSWORD)
+            default_username = os.getenv("WIAMEET_ADMIN_USERNAME", "admin").strip() or "admin"
+            default_password = os.getenv("WIAMEET_ADMIN_PASSWORD", "").strip()
+            if not default_password:
+                raise RuntimeError(
+                    "WIAMEET_ADMIN_PASSWORD is required when initializing the first administrator account."
+                )
             salt, password_hash = hash_password(default_password)
             conn.execute(
                 """
@@ -610,37 +655,89 @@ def public_user(row):
     return data
 
 
-def get_session_user(authorization: str | None = None, token: str | None = None):
-    if token:
-        token = token.strip()
-    elif authorization and authorization.startswith("Bearer "):
-        token = authorization.removeprefix("Bearer ").strip()
-    else:
-        raise HTTPException(status_code=401, detail="Authentication required.")
+def extract_session_token(authorization: str | None = None):
+    if authorization and authorization.startswith("Bearer "):
+        bearer_token = authorization.removeprefix("Bearer ").strip()
+        if bearer_token:
+            return bearer_token
+    raise HTTPException(status_code=401, detail="Authentication required.")
+
+
+def remove_cached_user_sessions(user_uuid: str, except_token_hash: str | None = None):
     with sessions_lock:
-        session = sessions.get(token)
+        for cached_token_hash, session in list(sessions.items()):
+            if (
+                session["user"].get("user_uuid") == user_uuid
+                and cached_token_hash != except_token_hash
+            ):
+                sessions.pop(cached_token_hash, None)
+
+
+def remove_user_media_sessions(user_uuid: str):
+    with media_sessions_lock:
+        for media_token_hash, session in list(media_sessions.items()):
+            if session.get("user_uuid") == user_uuid:
+                media_sessions.pop(media_token_hash, None)
+
+
+def get_media_user_uuid(
+    authorization: str | None = None,
+    media_session: str | None = None,
+):
+    if authorization:
+        return get_session_user(authorization)["user_uuid"]
+    if not media_session:
+        raise HTTPException(status_code=401, detail="Media authentication required.")
+
+    media_token_hash = hash_session_token(media_session)
+    now = datetime.now(KST)
+    with media_sessions_lock:
+        session = media_sessions.get(media_token_hash)
+        expires_at = parse_session_datetime(session.get("expires_at")) if session else None
+        if not session or not expires_at or expires_at <= now:
+            media_sessions.pop(media_token_hash, None)
+            raise HTTPException(status_code=401, detail="Invalid or expired media session.")
+    return session["user_uuid"]
+
+
+def get_session_user(authorization: str | None = None):
+    raw_token = extract_session_token(authorization)
+    token_hash = hash_session_token(raw_token)
+    now = datetime.now(KST)
+
+    with sessions_lock:
+        session = sessions.get(token_hash)
     if session:
-        return session["user"]
+        expires_at = parse_session_datetime(session.get("expires_at"))
+        if expires_at and expires_at > now:
+            return session["user"]
+        with sessions_lock:
+            sessions.pop(token_hash, None)
 
     with get_db_connection() as conn:
         row = conn.execute(
             """
             SELECT users.username, users.user_uuid, users.display_name, users.role,
-                   users.active, users.password_reset_required, users.created_at, users.last_login_at
+                   users.active, users.password_reset_required, users.created_at, users.last_login_at,
+                   auth_sessions.expires_at
             FROM auth_sessions
             JOIN users ON users.user_uuid = auth_sessions.user_uuid
-            WHERE auth_sessions.token = ? AND users.active = 1
+            WHERE auth_sessions.token_hash = ? AND users.active = 1
             """,
-            (token,),
+            (token_hash,),
         ).fetchone()
-    if not row:
-        raise HTTPException(status_code=401, detail="Invalid session.")
+        expires_at = parse_session_datetime(row["expires_at"]) if row else None
+        if not row or not expires_at or expires_at <= now:
+            if row:
+                conn.execute("DELETE FROM auth_sessions WHERE token_hash = ?", (token_hash,))
+                conn.commit()
+            raise HTTPException(status_code=401, detail="Invalid or expired session.")
 
     user_data = public_user(row)
     with sessions_lock:
-        sessions[token] = {
+        sessions[token_hash] = {
             "user": user_data,
-            "created_at": datetime.now(KST).isoformat(),
+            "expires_at": expires_at.isoformat(),
         }
     return user_data
 
@@ -729,10 +826,37 @@ def clear_work_root():
             path.unlink()
 
 
+def clear_expired_auth_sessions():
+    now = datetime.now(KST)
+    with get_db_connection() as conn:
+        cursor = conn.execute(
+            "DELETE FROM auth_sessions WHERE expires_at <= ?",
+            (now.isoformat(),),
+        )
+        conn.commit()
+
+    with sessions_lock:
+        for token_hash, session in list(sessions.items()):
+            expires_at = parse_session_datetime(session.get("expires_at"))
+            if not expires_at or expires_at <= now:
+                sessions.pop(token_hash, None)
+
+    with media_sessions_lock:
+        for token_hash, session in list(media_sessions.items()):
+            expires_at = parse_session_datetime(session.get("expires_at"))
+            if not expires_at or expires_at <= now:
+                media_sessions.pop(token_hash, None)
+
+    if cursor.rowcount:
+        print(f"[auth-sessions-cleanup] deleted {cursor.rowcount} expired session(s).", flush=True)
+    return cursor.rowcount
+
+
 def work_cleanup_loop():
     while not cleanup_stop_event.wait(seconds_until_next_work_cleanup()):
         clear_work_root()
         clear_expired_recording_drafts()
+        clear_expired_auth_sessions()
 
 
 app = FastAPI(title="WIAMeet API")
@@ -744,6 +868,7 @@ def start_work_cleanup_scheduler():
     init_app_db()
     clear_work_root()
     clear_expired_recording_drafts()
+    clear_expired_auth_sessions()
     if cleanup_thread and cleanup_thread.is_alive():
         return
     cleanup_stop_event.clear()
@@ -832,6 +957,17 @@ class JobStatus(BaseModel):
     logs: list[str] = []
 
 
+def require_job_owner(job_id: str, authorization: str | None):
+    user = get_session_user(authorization)
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found.")
+        if job.get("created_by_user_uuid") != user["user_uuid"]:
+            raise HTTPException(status_code=403, detail="You cannot access this job.")
+    return user
+
+
 def append_job_log(job: dict, stage: str, percent: int, message: str):
     logs = job.setdefault("logs", [])
     line = f"[{datetime.now().strftime('%H:%M:%S')}] {percent:>3}% {stage:<16} {message}"
@@ -906,6 +1042,8 @@ def login(request: LoginRequest):
     if not username or not password:
         raise HTTPException(status_code=400, detail="Username and password are required.")
 
+    now = datetime.now(KST)
+    expires_at = now + timedelta(hours=SESSION_TTL_HOURS)
     with get_db_connection() as conn:
         user = conn.execute(
             "SELECT * FROM users WHERE username = ? AND active = 1",
@@ -913,10 +1051,9 @@ def login(request: LoginRequest):
         ).fetchone()
         if not user or not verify_password(password, user["salt"], user["password_hash"]):
             raise HTTPException(status_code=401, detail="Invalid username or password.")
-        password_reset_required = 1 if verify_password(INITIAL_PASSWORD, user["salt"], user["password_hash"]) else user["password_reset_required"]
         conn.execute(
-            "UPDATE users SET last_login_at = ?, password_reset_required = ? WHERE user_uuid = ?",
-            (datetime.now(KST).isoformat(), password_reset_required, user["user_uuid"]),
+            "UPDATE users SET last_login_at = ? WHERE user_uuid = ?",
+            (now.isoformat(), user["user_uuid"]),
         )
         user = conn.execute(
             "SELECT * FROM users WHERE user_uuid = ?",
@@ -925,20 +1062,97 @@ def login(request: LoginRequest):
         conn.commit()
 
     token = secrets.token_urlsafe(32)
+    token_hash = hash_session_token(token)
     user_data = public_user(user)
     with get_db_connection() as conn:
         conn.execute(
-            "INSERT INTO auth_sessions (token, user_uuid, created_at) VALUES (?, ?, ?)",
-            (token, user["user_uuid"], datetime.now(KST).isoformat()),
+            """
+            INSERT INTO auth_sessions (token_hash, user_uuid, created_at, expires_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (token_hash, user["user_uuid"], now.isoformat(), expires_at.isoformat()),
         )
         conn.commit()
     with sessions_lock:
-        sessions[token] = {
+        sessions[token_hash] = {
             "user": user_data,
-            "created_at": datetime.now(KST).isoformat(),
+            "expires_at": expires_at.isoformat(),
         }
 
-    return {"token": token, "user": user_data}
+    return {"token": token, "expires_at": expires_at.isoformat(), "user": user_data}
+
+
+@app.post("/api/auth/media-session")
+def create_media_session(
+    response: Response,
+    authorization: str | None = Header(default=None),
+):
+    user = get_session_user(authorization)
+    raw_session_token = extract_session_token(authorization)
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT expires_at FROM auth_sessions WHERE token_hash = ?",
+            (hash_session_token(raw_session_token),),
+        ).fetchone()
+    login_expires_at = parse_session_datetime(row["expires_at"]) if row else None
+    if not login_expires_at:
+        raise HTTPException(status_code=401, detail="Invalid session.")
+
+    remove_user_media_sessions(user["user_uuid"])
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = hash_session_token(raw_token)
+    now = datetime.now(KST)
+    expires_at = min(
+        now + timedelta(hours=MEDIA_SESSION_TTL_HOURS),
+        login_expires_at,
+    )
+    max_age = max(1, int((expires_at - now).total_seconds()))
+    with media_sessions_lock:
+        media_sessions[token_hash] = {
+            "user_uuid": user["user_uuid"],
+            "expires_at": expires_at.isoformat(),
+        }
+    response.set_cookie(
+        key=MEDIA_SESSION_COOKIE,
+        value=raw_token,
+        max_age=max_age,
+        path="/api",
+        secure=True,
+        httponly=True,
+        samesite="strict",
+    )
+    return {"expires_at": expires_at.isoformat()}
+
+
+@app.post("/api/auth/logout")
+def logout(
+    response: Response,
+    authorization: str | None = Header(default=None),
+):
+    raw_token = extract_session_token(authorization)
+    token_hash = hash_session_token(raw_token)
+    user_uuid = None
+    with sessions_lock:
+        cached_session = sessions.get(token_hash)
+        if cached_session:
+            user_uuid = cached_session["user"].get("user_uuid")
+    if not user_uuid:
+        with get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT user_uuid FROM auth_sessions WHERE token_hash = ?",
+                (token_hash,),
+            ).fetchone()
+            user_uuid = row["user_uuid"] if row else None
+
+    with get_db_connection() as conn:
+        conn.execute("DELETE FROM auth_sessions WHERE token_hash = ?", (token_hash,))
+        conn.commit()
+    with sessions_lock:
+        sessions.pop(token_hash, None)
+    if user_uuid:
+        remove_user_media_sessions(user_uuid)
+    response.delete_cookie(MEDIA_SESSION_COOKIE, path="/api", secure=True, httponly=True, samesite="strict")
+    return {"logged_out": True}
 
 
 @app.get("/api/admin/users")
@@ -963,7 +1177,8 @@ def create_user(request: CreateUserRequest, authorization: str | None = Header(d
     if not username or not display_name:
         raise HTTPException(status_code=400, detail="Username and display name are required.")
 
-    salt, password_hash = hash_password(INITIAL_PASSWORD)
+    temporary_password = generate_temporary_password()
+    salt, password_hash = hash_password(temporary_password)
     try:
         with get_db_connection() as conn:
             conn.execute(
@@ -982,22 +1197,27 @@ def create_user(request: CreateUserRequest, authorization: str | None = Header(d
             "SELECT username, user_uuid, display_name, role, active, password_reset_required, created_at, last_login_at FROM users WHERE username = ?",
             (username,),
         ).fetchone()
-    return {"user": public_user(user)}
+    return {"user": public_user(user), "temporary_password": temporary_password}
 
 
 @app.post("/api/admin/users/{user_uuid}/password/reset")
 def reset_user_password(user_uuid: str, authorization: str | None = Header(default=None)):
     require_admin(authorization)
-    salt, password_hash = hash_password(INITIAL_PASSWORD)
+    temporary_password = generate_temporary_password()
+    salt, password_hash = hash_password(temporary_password)
     with get_db_connection() as conn:
         cursor = conn.execute(
             "UPDATE users SET password_hash = ?, salt = ?, password_reset_required = 1 WHERE user_uuid = ?",
             (password_hash, salt, user_uuid),
         )
+        if cursor.rowcount:
+            conn.execute("DELETE FROM auth_sessions WHERE user_uuid = ?", (user_uuid,))
         conn.commit()
     if cursor.rowcount == 0:
         raise HTTPException(status_code=404, detail="User not found.")
-    return {"reset": True}
+    remove_cached_user_sessions(user_uuid)
+    remove_user_media_sessions(user_uuid)
+    return {"reset": True, "temporary_password": temporary_password}
 
 
 @app.post("/api/auth/password")
@@ -1006,24 +1226,31 @@ def update_own_password(request: UpdatePasswordRequest, authorization: str | Non
     password = request.password
     if len(password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
-    if password == INITIAL_PASSWORD:
-        raise HTTPException(status_code=400, detail="Password must be different from the initial password.")
+
+    raw_token = extract_session_token(authorization)
+    current_token_hash = hash_session_token(raw_token)
     salt, password_hash = hash_password(password)
     with get_db_connection() as conn:
         conn.execute(
             "UPDATE users SET password_hash = ?, salt = ?, password_reset_required = 0 WHERE user_uuid = ?",
             (password_hash, salt, user["user_uuid"]),
         )
+        conn.execute(
+            "DELETE FROM auth_sessions WHERE user_uuid = ? AND token_hash != ?",
+            (user["user_uuid"], current_token_hash),
+        )
         updated = conn.execute(
             "SELECT username, user_uuid, display_name, role, active, password_reset_required, created_at, last_login_at FROM users WHERE user_uuid = ?",
             (user["user_uuid"],),
         ).fetchone()
         conn.commit()
+
     user_data = public_user(updated)
-    token = authorization.removeprefix("Bearer ").strip()
+    remove_cached_user_sessions(user["user_uuid"], current_token_hash)
+    remove_user_media_sessions(user["user_uuid"])
     with sessions_lock:
-        if token in sessions:
-            sessions[token]["user"] = user_data
+        if current_token_hash in sessions:
+            sessions[current_token_hash]["user"] = user_data
     return {"user": user_data}
 
 
@@ -1471,9 +1698,9 @@ def create_recording_draft(
 def get_recording_draft_audio(
     draft_uuid: str,
     authorization: str | None = Header(default=None),
-    token: str | None = Query(default=None),
+    media_session: str | None = Cookie(default=None, alias=MEDIA_SESSION_COOKIE),
 ):
-    user = get_session_user(authorization, token)
+    user_uuid = get_media_user_uuid(authorization, media_session)
     with get_db_connection() as conn:
         row = conn.execute(
             """
@@ -1481,7 +1708,7 @@ def get_recording_draft_audio(
             FROM recording_drafts
             WHERE draft_uuid = ? AND user_id = ?
             """,
-            (draft_uuid, user["user_uuid"]),
+            (draft_uuid, user_uuid),
         ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Recording draft not found.")
@@ -1627,11 +1854,12 @@ def create_job(
         }
 
     executor.submit(run_job, job_id)
-    return get_job(job_id)
+    return get_job(job_id, authorization)
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobStatus)
-def get_job(job_id: str):
+def get_job(job_id: str, authorization: str | None = Header(default=None)):
+    require_job_owner(job_id, authorization)
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
@@ -1647,7 +1875,8 @@ def get_job(job_id: str):
 
 
 @app.get("/api/jobs/{job_id}/result")
-def get_result(job_id: str):
+def get_result(job_id: str, authorization: str | None = Header(default=None)):
+    require_job_owner(job_id, authorization)
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
@@ -1667,7 +1896,8 @@ def get_result(job_id: str):
 
 
 @app.get("/api/jobs/{job_id}/stt-corrections")
-def get_stt_corrections(job_id: str):
+def get_stt_corrections(job_id: str, authorization: str | None = Header(default=None)):
+    require_job_owner(job_id, authorization)
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
@@ -1676,7 +1906,8 @@ def get_stt_corrections(job_id: str):
 
 
 @app.get("/api/jobs/{job_id}/speaker-matches")
-def get_speaker_matches(job_id: str):
+def get_speaker_matches(job_id: str, authorization: str | None = Header(default=None)):
+    require_job_owner(job_id, authorization)
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
@@ -1685,7 +1916,8 @@ def get_speaker_matches(job_id: str):
 
 
 @app.get("/api/jobs/{job_id}/refined-result")
-def get_refined_result(job_id: str):
+def get_refined_result(job_id: str, authorization: str | None = Header(default=None)):
+    require_job_owner(job_id, authorization)
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
@@ -1697,7 +1929,12 @@ def get_refined_result(job_id: str):
 
 
 @app.post("/api/jobs/{job_id}/speaker-map")
-def update_speaker_mapping(job_id: str, request: SpeakerMappingRequest):
+def update_speaker_mapping(
+    job_id: str,
+    request: SpeakerMappingRequest,
+    authorization: str | None = Header(default=None),
+):
+    require_job_owner(job_id, authorization)
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
@@ -1726,7 +1963,12 @@ def update_speaker_mapping(job_id: str, request: SpeakerMappingRequest):
 
 
 @app.post("/api/jobs/{job_id}/report")
-def create_report(job_id: str, request: ReportRequest):
+def create_report(
+    job_id: str,
+    request: ReportRequest,
+    authorization: str | None = Header(default=None),
+):
+    require_job_owner(job_id, authorization)
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
@@ -1756,7 +1998,12 @@ def create_report(job_id: str, request: ReportRequest):
 
 
 @app.post("/api/jobs/{job_id}/report/finalize")
-def finalize_report(job_id: str, request: ReportFinalizeRequest):
+def finalize_report(
+    job_id: str,
+    request: ReportFinalizeRequest,
+    authorization: str | None = Header(default=None),
+):
+    require_job_owner(job_id, authorization)
     report_markdown = request.report_markdown.strip()
     if not report_markdown:
         raise HTTPException(status_code=400, detail="Report markdown is required.")
@@ -1780,7 +2027,8 @@ def finalize_report(job_id: str, request: ReportFinalizeRequest):
 
 
 @app.post("/api/jobs/{job_id}/complete")
-def complete_job(job_id: str):
+def complete_job(job_id: str, authorization: str | None = Header(default=None)):
+    require_job_owner(job_id, authorization)
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
@@ -2119,13 +2367,13 @@ def download_meeting_report_references(job_id: str, authorization: str | None = 
 def get_meeting_report_audio(
     job_id: str,
     authorization: str | None = Header(default=None),
-    token: str | None = Query(default=None),
+    media_session: str | None = Cookie(default=None, alias=MEDIA_SESSION_COOKIE),
 ):
-    user = get_session_user(authorization, token)
+    user_uuid = get_media_user_uuid(authorization, media_session)
     with get_db_connection() as conn:
         row = conn.execute(
             "SELECT job_id FROM meeting_reports WHERE job_id = ? AND user_uuid = ?",
-            (job_id, user["user_uuid"]),
+            (job_id, user_uuid),
         ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Report not found.")
@@ -2137,7 +2385,20 @@ def get_meeting_report_audio(
 
 
 @app.get("/api/jobs/{job_id}/download/{filename}")
-def download_file(job_id: str, filename: str):
+def download_file(
+    job_id: str,
+    filename: str,
+    authorization: str | None = Header(default=None),
+):
+    user = get_session_user(authorization)
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM meeting_reports WHERE job_id = ? AND user_uuid = ?",
+            (job_id, user["user_uuid"]),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Report not found.")
+
     path_by_filename = {
         "original_result.json": JOB_ROOT / job_id / "meta" / "original_result.json",
         "refined_result.json": JOB_ROOT / job_id / "meta" / "refined_result.json",

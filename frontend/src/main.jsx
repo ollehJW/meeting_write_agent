@@ -139,6 +139,45 @@ function MarkdownReport({ markdown }) {
   );
 }
 
+function AuthenticatedAudio({ path, token, className = '', onSessionExpired }) {
+  const [sourceUrl, setSourceUrl] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  async function loadAudio() {
+    if (isLoading || sourceUrl) return;
+    setIsLoading(true);
+    setError('');
+    try {
+      const response = await fetch(API_BASE + '/api/auth/media-session', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token },
+        credentials: 'include',
+      });
+      if (response.status === 401) {
+        onSessionExpired?.();
+        return;
+      }
+      if (!response.ok) throw new Error('오디오 재생 권한을 확인하지 못했습니다.');
+      setSourceUrl(API_BASE + path);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  if (sourceUrl) return <audio className={className} src={sourceUrl} controls preload="metadata" />;
+  return (
+    <div className="authenticated-audio-loader">
+      <button type="button" onClick={loadAudio} disabled={isLoading}>
+        {isLoading ? <span className="btn-spinner blue" aria-hidden="true" /> : <Play size={14} />}
+        {isLoading ? '불러오는 중' : '미리듣기'}
+      </button>
+      {error && <small>{error}</small>}
+    </div>
+  );
+}
 
 
 function getMobileViewFromPath(pathname = window.location.pathname) {
@@ -1763,13 +1802,17 @@ function App() {
     }
   }
 
+  function clearLoungeAudioUrl() {
+    setLoungeAudioUrl('');
+  }
+
   async function openLoungeReport(report) {
     setSelectedLoungeReport(report);
     setLoungeDetail(null);
     setIsLoadingLoungeDetail(true);
     setIsLoadingLoungeAudio(false);
     setLoungeError('');
-    setLoungeAudioUrl('');
+    clearLoungeAudioUrl();
     setConfluencePublishError('');
 
     try {
@@ -1784,7 +1827,18 @@ function App() {
       setIsLoadingLoungeDetail(false);
 
       if (detail.has_audio) {
-        setLoungeAudioUrl(authenticatedUrl('/api/reports/' + report.job_id + '/audio'));
+        setIsLoadingLoungeAudio(true);
+        const mediaResponse = await fetch(API_BASE + '/api/auth/media-session', {
+          method: 'POST',
+          headers: authHeaders(),
+          credentials: 'include',
+        });
+        if (mediaResponse.status === 401) {
+          handleExpiredSession();
+          return;
+        }
+        if (!mediaResponse.ok) throw new Error('오디오 재생 권한을 확인하지 못했습니다.');
+        setLoungeAudioUrl(API_BASE + '/api/reports/' + report.job_id + '/audio');
       }
     } catch (err) {
       setLoungeError(err.message);
@@ -1799,8 +1853,9 @@ function App() {
     setLoungeDetail(null);
     setIsLoadingLoungeAudio(false);
     setMeetingInfoOpen(false);
-    setLoungeAudioUrl('');
+    clearLoungeAudioUrl();
   }
+
 
   async function reloadSelectedLoungeReport() {
     const report = selectedLoungeReport || loungeDetail;
@@ -1902,7 +1957,7 @@ function App() {
   }
 
   async function refreshResult(jobId) {
-    const response = await fetch(`${API_BASE}/api/jobs/${jobId}/result`);
+    const response = await apiFetch(`/api/jobs/${jobId}/result`);
     if (!response.ok) throw new Error('결과를 불러오지 못했습니다.');
     const data = await response.json();
     setResult(data.result);
@@ -1918,7 +1973,7 @@ function App() {
     if (pollRef.current) window.clearInterval(pollRef.current);
     pollRef.current = window.setInterval(async () => {
       try {
-        const response = await fetch(`${API_BASE}/api/jobs/${jobId}`);
+        const response = await apiFetch(`/api/jobs/${jobId}`);
         if (!response.ok) throw new Error('작업 상태를 확인하지 못했습니다.');
         const data = await response.json();
         setJob(data);
@@ -2071,7 +2126,7 @@ function App() {
     }
   }
 
-  function handleLogout() {
+  function clearLocalSession() {
     setCurrentView('home');
     setAuthToken('');
     setAuthUser(null);
@@ -2079,17 +2134,33 @@ function App() {
     window.localStorage.removeItem('wiameet_user');
   }
 
-  function authHeaders() {
-    return { Authorization: `Bearer ${authToken}` };
+  function handleLogout() {
+    const token = authToken;
+    if (token) {
+      fetch(API_BASE + '/api/auth/logout', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token },
+        keepalive: true,
+      }).catch(() => {});
+    }
+    clearLocalSession();
   }
 
-  function authenticatedUrl(path) {
-    const separator = path.includes('?') ? '&' : '?';
-    return `${API_BASE}${path}${separator}token=${encodeURIComponent(authToken)}`;
+  function authHeaders() {
+    return { Authorization: 'Bearer ' + authToken };
   }
+
+  async function apiFetch(path, options = {}) {
+    const headers = new Headers(options.headers || {});
+    headers.set('Authorization', 'Bearer ' + authToken);
+    const response = await fetch(API_BASE + path, { ...options, headers });
+    if (response.status === 401) handleExpiredSession();
+    return response;
+  }
+
 
   function handleExpiredSession() {
-    handleLogout();
+    clearLocalSession();
     setLoginError('세션이 만료되었습니다. 다시 로그인하세요.');
   }
 
@@ -2131,8 +2202,9 @@ function App() {
         const data = await response.json().catch(() => ({}));
         throw new Error(data.detail || '계정 추가에 실패했습니다.');
       }
+      const data = await response.json();
       setNewAccount({ username: '', display_name: '', role: 'user' });
-      setAccountMessage('계정을 추가했습니다.');
+      setAccountMessage('계정을 추가했습니다. 임시 비밀번호: ' + data.temporary_password + ' (이 화면에서 한 번만 표시됩니다.)');
       await loadAccounts();
     } catch (err) {
       setAccountError(err.message);
@@ -2156,9 +2228,10 @@ function App() {
       }
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
-        throw new Error(data.detail || '비밀번호 초기화에 실패했습니다.');
+        throw new Error(data.detail || '임시 비밀번호 재발급에 실패했습니다.');
       }
-      setAccountMessage('비밀번호를 초기 비밀번호로 초기화했습니다.');
+      const data = await response.json();
+      setAccountMessage('임시 비밀번호를 재발급했습니다: ' + data.temporary_password + ' (이 화면에서 한 번만 표시됩니다.)');
       await loadAccounts();
     } catch (err) {
       setAccountError(err.message);
@@ -2172,10 +2245,6 @@ function App() {
     setRequiredPasswordError('');
     if (requiredPassword.length < 6) {
       setRequiredPasswordError('비밀번호는 6자 이상이어야 합니다.');
-      return;
-    }
-    if (requiredPassword === 'wia1234!') {
-      setRequiredPasswordError('초기 비밀번호와 다른 비밀번호를 입력하세요.');
       return;
     }
     if (requiredPassword !== requiredPasswordConfirm) {
@@ -2593,7 +2662,7 @@ function App() {
     setIsSavingMap(true);
     setError('');
     try {
-      const response = await fetch(`${API_BASE}/api/jobs/${job.job_id}/speaker-map`, {
+      const response = await apiFetch(`/api/jobs/${job.job_id}/speaker-map`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mapping: speakerMapping, sentences: result?.sentences || [] }),
@@ -2615,7 +2684,7 @@ function App() {
     setIsGeneratingReport(true);
     setError('');
     try {
-      const response = await fetch(`${API_BASE}/api/jobs/${job.job_id}/report`, {
+      const response = await apiFetch(`/api/jobs/${job.job_id}/report`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ special_instruction: reportInstruction }),
@@ -2636,7 +2705,7 @@ function App() {
     setIsFinalizingReport(true);
     setError('');
     try {
-      const response = await fetch(`${API_BASE}/api/jobs/${job.job_id}/report/finalize`, {
+      const response = await apiFetch(`/api/jobs/${job.job_id}/report/finalize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ report_markdown: reportMarkdown }),
@@ -2690,7 +2759,7 @@ function App() {
     setIsCompletingReport(true);
     setError('');
     try {
-      const response = await fetch(`${API_BASE}/api/jobs/${job.job_id}/complete`, {
+      const response = await apiFetch(`/api/jobs/${job.job_id}/complete`, {
         method: 'POST',
       });
       if (!response.ok) throw await apiError(response, '회의록 저장 완료 처리에 실패했습니다.');
@@ -2811,14 +2880,14 @@ function App() {
         <div className="password-required-head">
           <KeyRound size={22} />
           <div>
-            <span>Initial Password</span>
+            <span>Temporary Password</span>
             <h2>비밀번호 설정</h2>
-            <p>현재 계정은 초기 비밀번호를 사용 중입니다. 계속 진행하려면 새 비밀번호를 설정하세요.</p>
+            <p>현재 계정은 임시 비밀번호를 사용 중입니다. 계속 진행하려면 새 비밀번호를 설정하세요.</p>
           </div>
         </div>
         <label className="login-field">
           <span>새 비밀번호</span>
-          <input type="password" value={requiredPassword} onChange={(event) => setRequiredPassword(event.target.value)} placeholder="초기 비밀번호와 다른 6자 이상" />
+          <input type="password" value={requiredPassword} onChange={(event) => setRequiredPassword(event.target.value)} placeholder="6자 이상 입력" />
         </label>
         <label className="login-field">
           <span>새 비밀번호 확인</span>
@@ -3068,7 +3137,12 @@ function App() {
                   </div>
                 </div>
                 {draft.available ? (
-                  <audio className="draft-preview-audio" src={authenticatedUrl(`/api/recording-drafts/${draft.draft_uuid}/audio`)} controls preload="metadata" />
+                  <AuthenticatedAudio
+                    className="draft-preview-audio"
+                    path={'/api/recording-drafts/' + draft.draft_uuid + '/audio'}
+                    token={authToken}
+                    onSessionExpired={handleExpiredSession}
+                  />
                 ) : (
                   <div className="draft-preview-missing">파일을 찾을 수 없습니다.</div>
                 )}
@@ -4004,7 +4078,7 @@ function App() {
                     <span>표시 이름</span>
                     <input value={newAccount.display_name} onChange={(event) => setNewAccount((prev) => ({ ...prev, display_name: event.target.value }))} placeholder="예) 홍길동 매니저" />
                   </label>
-                  <div className="account-initial-password">초기 비밀번호는 <b>wia1234!</b>로 고정됩니다.</div>
+                  <div className="account-initial-password">계정 생성 후 임시 비밀번호가 한 번만 표시됩니다.</div>
                   <label className="account-field">
                     <span>권한</span>
                     <select value={newAccount.role} onChange={(event) => setNewAccount((prev) => ({ ...prev, role: event.target.value }))}>
@@ -4037,10 +4111,10 @@ function App() {
                           </div>
                         </div>
                         <div className="account-password-box reset-only">
-                          {user.password_reset_required && <span className="reset-required">초기 비밀번호 상태</span>}
+                          {user.password_reset_required && <span className="reset-required">임시 비밀번호 상태</span>}
                           <button className="line-btn" type="button" onClick={() => resetAccountPassword(user.user_uuid)} disabled={resettingPasswordId === user.user_uuid}>
                             {resettingPasswordId === user.user_uuid ? <span className="btn-spinner blue" aria-hidden="true"></span> : <KeyRound size={15} />}
-                            초기화
+                            재발급
                           </button>
                         </div>
                       </div>
@@ -4557,7 +4631,12 @@ function App() {
                   </div>
                 </div>
                 {draft.available ? (
-                  <audio className="draft-preview-audio" src={authenticatedUrl(`/api/recording-drafts/${draft.draft_uuid}/audio`)} controls preload="metadata" />
+                  <AuthenticatedAudio
+                    className="draft-preview-audio"
+                    path={'/api/recording-drafts/' + draft.draft_uuid + '/audio'}
+                    token={authToken}
+                    onSessionExpired={handleExpiredSession}
+                  />
                 ) : (
                   <div className="draft-preview-missing">파일을 찾을 수 없습니다.</div>
                 )}

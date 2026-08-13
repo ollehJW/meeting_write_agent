@@ -103,5 +103,5 @@ http://localhost:9702/
 - `--reload` 옵션을 사용하므로 backend 코드 수정 시 서버가 자동 재시작됩니다.
 - pyannote에서 `torchcodec` 관련 경고가 표시될 수 있지만, 현재 구현은 `torchaudio.load()`로 waveform을 미리 로드해 전달합니다.
 
-  - 아이디: admin
-  - 비밀번호: wia1234!
+- 최초 실행으로 사용자 테이블이 비어 있을 때는 `.env`의 `WIAMEET_ADMIN_PASSWORD`가 필수입니다. 초기 관리자 아이디는 `WIAMEET_ADMIN_USERNAME`으로 지정합니다.
+- 로그인 세션은 발급 후 12시간 동안 유효하며, 로그아웃하거나 비밀번호가 재발급되면 서버에서도 폐기됩니다.

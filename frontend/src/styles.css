@@ -2301,6 +2301,22 @@ a { color: inherit; text-decoration: none; }
 .draft-list-item b { color: #263246; font-size: 13.5px; font-weight: 950; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .draft-list-item small { color: #7d8797; font-size: 11.5px; white-space: nowrap; }
 .draft-preview-audio { width: 100%; height: 38px; }
+.authenticated-audio-loader { min-height: 38px; display: grid; gap: 5px; }
+.authenticated-audio-loader button {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid #d8e0ec;
+  background: #fff;
+  color: #3f4d61;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 850;
+}
+.authenticated-audio-loader button:hover:not(:disabled) { border-color: var(--wia-blue); color: var(--wia-blue); background: #f6f9ff; }
+.authenticated-audio-loader small { color: #b42318; font-size: 11px; }
 .draft-preview-missing { min-height: 38px; border: 1px dashed #d8e0ec; background: #fff; color: #8a96a8; display: grid; place-items: center; font-size: 12px; }
 .draft-load-btn {
   width: 100%;
