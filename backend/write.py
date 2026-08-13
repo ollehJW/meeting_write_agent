@@ -46,5 +46,5 @@ def build_prompt(transcript_text, special_instruction):
     )
 
 
-def generate_report(prompt):
-    return chat_completion(prompt)
+def generate_report(prompt, context=None):
+    return chat_completion(prompt, context=context)

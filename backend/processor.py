@@ -1,3 +1,4 @@
+import hashlib
 import json
 import gc
 import logging
@@ -406,20 +407,27 @@ def build_stt_correction_prompt(sentences, participant_list, meeting_purpose="",
     )
 
 
-def find_stt_corrections_for_batch(sentences, participant_list, meeting_purpose="", meeting_reference_text=""):
-    prompt = build_stt_correction_prompt(
-        sentences,
-        participant_list,
-        meeting_purpose,
-        meeting_reference_text,
-    )
-    parsed = extract_json_object(chat_completion(prompt))
+def find_stt_corrections_for_batch(
+    sentences, participant_list, meeting_purpose="", meeting_reference_text="", llm_context=None,
+):
+    prompt = build_stt_correction_prompt(sentences, participant_list, meeting_purpose, meeting_reference_text)
+    parsed = extract_json_object(chat_completion(prompt, context=llm_context))
     return parsed.get("corrections", []) if parsed else []
 
 
-def find_stt_corrections(sentences, participant_list, meeting_purpose="", meeting_reference_text="", progress=None):
+def find_stt_corrections(
+    sentences, participant_list, meeting_purpose="", meeting_reference_text="",
+    progress=None, output_dir=None, job_id=None,
+):
     all_corrections = []
     total_batches = max(1, (len(sentences) + CORRECTION_BATCH_SIZE - 1) // CORRECTION_BATCH_SIZE)
+    checkpoint_path = Path(output_dir) / "stt_correction_batches.json" if output_dir else None
+    checkpoints = {}
+    if checkpoint_path and checkpoint_path.exists():
+        try:
+            checkpoints = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            checkpoints = {}
 
     for batch_index, batch_sentences in batched(sentences, CORRECTION_BATCH_SIZE):
         first_index = batch_sentences[0].get("index", "") if batch_sentences else ""
@@ -428,29 +436,40 @@ def find_stt_corrections(sentences, participant_list, meeting_purpose="", meetin
             f"문맥 기반 교정 배치 실행 중: {batch_index}/{total_batches} 배치 "
             f"({len(batch_sentences)}문장, index {first_index}-{last_index})"
         )
-        log.info(
-            "Running correction batch %s/%s (%s sentences, index %s-%s)",
-            batch_index,
-            total_batches,
-            len(batch_sentences),
-            first_index,
-            last_index,
-        )
+        log.info("Running correction batch %s/%s (%s sentences, index %s-%s)",
+                 batch_index, total_batches, len(batch_sentences), first_index, last_index)
         start_percent = 90 + int(4 * (batch_index - 1) / total_batches)
         notify(progress, "stt_correction", start_percent, batch_message)
-        all_corrections.extend(
-            find_stt_corrections_for_batch(
-                batch_sentences,
-                participant_list,
-                meeting_purpose,
-                meeting_reference_text,
+        fingerprint = hashlib.sha256(
+            json.dumps(batch_sentences, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        checkpoint = checkpoints.get(str(batch_index), {})
+        if checkpoint.get("fingerprint") == fingerprint:
+            batch_corrections = checkpoint.get("corrections", [])
+            log.info("Reusing correction checkpoint for batch %s/%s", batch_index, total_batches)
+        else:
+            batch_corrections = find_stt_corrections_for_batch(
+                batch_sentences, participant_list, meeting_purpose, meeting_reference_text,
+                {"job_id": job_id, "stage": "stt_correction",
+                 "batch_index": batch_index, "batch_count": total_batches},
             )
-        )
+            checkpoints[str(batch_index)] = {"fingerprint": fingerprint, "corrections": batch_corrections}
+            if checkpoint_path:
+                temporary_path = checkpoint_path.with_suffix(".tmp")
+                temporary_path.write_text(
+                    json.dumps(checkpoints, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                temporary_path.replace(checkpoint_path)
+        all_corrections.extend(batch_corrections)
         percent = 90 + int(4 * batch_index / total_batches)
-        notify(progress, "stt_correction", percent, f"문맥 기반 교정 배치 완료: {batch_index}/{total_batches} 배치")
+        notify(
+            progress,
+            "stt_correction",
+            percent,
+            f"문맥 기반 교정 배치 완료: {batch_index}/{total_batches} 배치",
+        )
 
     return all_corrections
-
 
 def apply_stt_corrections(sentences, corrections):
     corrected_sentences = [sentence.copy() for sentence in sentences]
@@ -477,14 +496,16 @@ def apply_stt_corrections(sentences, corrections):
     return corrected_sentences, applied
 
 
-def match_speakers(sentences, total_speakers, participant_list):
+def match_speakers(sentences, total_speakers, participant_list, job_id=None):
     transcript_text = format_transcript_for_llm(sentences)
     prompt = load_prompt_template("speaker_matching.txt").format(
         last_speaker_id=max(total_speakers - 1, 0),
         participant_list=participant_list,
         transcript_text=transcript_text,
     )
-    parsed = extract_json_object(chat_completion(prompt))
+    parsed = extract_json_object(chat_completion(
+        prompt, context={"job_id": job_id, "stage": "speaker_matching"},
+    ))
     return parsed if parsed else {"matches": []}
 
 
@@ -513,7 +534,10 @@ def apply_speaker_matches(sentences, matches_data, output_dir: Path):
     return mapped_sentences
 
 
-def run_llm_postprocess(result, output_dir: Path, participant_list, meeting_purpose, meeting_reference_text, progress=None):
+def run_llm_postprocess(
+    result, output_dir: Path, participant_list, meeting_purpose,
+    meeting_reference_text, progress=None, job_id=None,
+):
     sentences = keep_first_consecutive_duplicate_content(result.get("sentences", []))
     for sentence in sentences:
         sentence.setdefault("speaker_id", sentence["speaker"])
@@ -525,14 +549,19 @@ def run_llm_postprocess(result, output_dir: Path, participant_list, meeting_purp
     )
 
     notify(progress, "stt_correction", 90, "STT 결과를 문맥 기반으로 교정하고 있습니다.")
-    corrections = find_stt_corrections(sentences, participant_list, meeting_purpose, meeting_reference_text, progress)
+    corrections = find_stt_corrections(
+        sentences, participant_list, meeting_purpose, meeting_reference_text,
+        progress, output_dir, job_id,
+    )
     sentences, applied_corrections = apply_stt_corrections(sentences, corrections)
     notify(progress, "stt_correction", 94, f"STT 결과 교정 완료 — {len(applied_corrections)}건 반영")
     stt_corrections_output = {"corrections": applied_corrections}
     sentences = merge_consecutive_transcript_sentences(sentences, MAX_MERGE_SILENCE_S)
 
     notify(progress, "speaker_matching", 95, "화자를 참석자 명단과 매칭하고 있습니다.")
-    matches_data = match_speakers(sentences, result.get("total_speakers", 0), participant_list)
+    matches_data = match_speakers(
+        sentences, result.get("total_speakers", 0), participant_list, job_id,
+    )
     mapped_sentences = apply_speaker_matches(sentences, matches_data, output_dir)
     notify(progress, "mapping_review", 99, "화자 매칭 결과를 확인할 준비가 되었습니다.")
     return {

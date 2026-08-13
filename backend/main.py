@@ -8,6 +8,7 @@ import sqlite3
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 from urllib import error as urllib_error, request as urllib_request
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -22,7 +23,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from cryptography.fernet import Fernet, InvalidToken
 
-from .processor import apply_speaker_mapping, release_gpu_memory, run_llm_postprocess, transcribe_meeting
+from .processor import apply_speaker_mapping, run_llm_postprocess, transcribe_meeting
 from .read import SUPPORTED_EXTENSIONS, read_text
 from .write import build_prompt, format_transcript, generate_report
 from .confluence import ConfluencePublishError, create_page as create_confluence_page
@@ -43,6 +44,19 @@ SESSION_TTL_HOURS = 12
 MEDIA_SESSION_TTL_HOURS = 2
 MEDIA_SESSION_COOKIE = "wiameet_media_session"
 CONFLUENCE_TOKEN_PREFIX = "fernet:"
+
+def env_int(name: str, default: int, minimum: int = 0):
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, value)
+
+
+GPU_WORKERS = env_int("GPU_WORKERS", 1, 1)
+LLM_WORKERS = env_int("LLM_WORKERS", 3, 1)
+MAX_ACTIVE_JOBS = env_int("MAX_ACTIVE_JOBS", 6, 1)
+MAX_QUEUED_JOBS = env_int("MAX_QUEUED_JOBS", 10)
 
 cleanup_stop_event = Event()
 cleanup_thread: Thread | None = None
@@ -134,8 +148,9 @@ def decrypt_confluence_token(value: str):
 
 
 def get_db_connection():
-    conn = sqlite3.connect(APP_DB_PATH)
+    conn = sqlite3.connect(APP_DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
 
@@ -595,10 +610,35 @@ def migrate_meeting_reports_table(conn):
     conn.execute("ALTER TABLE meeting_reports_new RENAME TO meeting_reports")
 
 
+def create_processing_jobs_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS processing_jobs (
+            job_id TEXT PRIMARY KEY,
+            user_uuid TEXT NOT NULL,
+            status TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            progress INTEGER NOT NULL DEFAULT 0,
+            message TEXT NOT NULL DEFAULT '',
+            logs_json TEXT NOT NULL DEFAULT '[]',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            error_message TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_processing_jobs_user ON processing_jobs(user_uuid, updated_at)"
+    )
+
+
 def init_app_db():
     APP_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     get_confluence_secret_key()
     with get_db_connection() as conn:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
         conn.execute("PRAGMA foreign_keys = OFF")
         migrate_users_table(conn)
         migrate_auth_sessions_table(conn)
@@ -609,6 +649,7 @@ def init_app_db():
         create_confluence_published_reports_table(conn)
         migrate_confluence_settings_table(conn)
         migrate_confluence_tokens_encrypted(conn)
+        create_processing_jobs_table(conn)
         conn.execute("PRAGMA foreign_keys = ON")
 
         user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -811,14 +852,10 @@ def clear_expired_recording_drafts():
 
 def clear_work_root():
     with jobs_lock:
-        active_job_ids = {
-            job_id
-            for job_id, job in jobs.items()
-            if job.get("status") in {"queued", "running"}
-        }
+        retained_job_ids = set(jobs)
 
     for path in WORK_ROOT.iterdir():
-        if path.name in active_job_ids:
+        if path.name in retained_job_ids:
             continue
         if path.is_dir():
             shutil.rmtree(path)
@@ -866,7 +903,9 @@ app = FastAPI(title="WIAMeet API")
 def start_work_cleanup_scheduler():
     global cleanup_thread
     init_app_db()
+    load_processing_jobs()
     clear_work_root()
+    recover_processing_jobs()
     clear_expired_recording_drafts()
     clear_expired_auth_sessions()
     if cleanup_thread and cleanup_thread.is_alive():
@@ -879,6 +918,8 @@ def start_work_cleanup_scheduler():
 @app.on_event("shutdown")
 def stop_work_cleanup_scheduler():
     cleanup_stop_event.set()
+    gpu_executor.shutdown(wait=False, cancel_futures=True)
+    llm_executor.shutdown(wait=False, cancel_futures=True)
 
 
 app.add_middleware(
@@ -890,9 +931,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-executor = ThreadPoolExecutor(max_workers=1)
+gpu_executor = ThreadPoolExecutor(max_workers=GPU_WORKERS, thread_name_prefix="gpu-worker")
+llm_executor = ThreadPoolExecutor(max_workers=LLM_WORKERS, thread_name_prefix="llm-worker")
 jobs: dict[str, dict] = {}
 jobs_lock = Lock()
+active_job_ids: set[str] = set()
+pending_job_ids = deque()
 
 
 class LoginRequest(BaseModel):
@@ -975,12 +1019,122 @@ def append_job_log(job: dict, stage: str, percent: int, message: str):
         logs.append(line)
 
 
+def processing_job_payload(job):
+    excluded = {
+        "status", "stage", "progress", "message", "logs", "result",
+        "original_result", "refined_result", "stt_corrections", "speaker_matches",
+    }
+    return {key: value for key, value in job.items() if key not in excluded}
+
+
+def persist_job(job_id: str):
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            return
+        snapshot = dict(job)
+        snapshot["logs"] = list(job.get("logs", []))
+    now = datetime.now(KST).isoformat()
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO processing_jobs (
+                job_id, user_uuid, status, stage, progress, message, logs_json,
+                payload_json, created_at, updated_at, error_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id) DO UPDATE SET
+                status=excluded.status, stage=excluded.stage, progress=excluded.progress,
+                message=excluded.message, logs_json=excluded.logs_json,
+                payload_json=excluded.payload_json, updated_at=excluded.updated_at,
+                error_message=excluded.error_message
+            """,
+            (
+                job_id,
+                snapshot.get("created_by_user_uuid", ""),
+                snapshot.get("status", "queued"),
+                snapshot.get("stage", "queued"),
+                snapshot.get("progress", 0),
+                snapshot.get("message", ""),
+                json.dumps(snapshot.get("logs", []), ensure_ascii=False),
+                json.dumps(processing_job_payload(snapshot), ensure_ascii=False),
+                snapshot.get("created_at", now),
+                now,
+                snapshot.get("error_message"),
+            ),
+        )
+        conn.commit()
+
+
+def delete_processing_job(job_id: str):
+    with get_db_connection() as conn:
+        conn.execute("DELETE FROM processing_jobs WHERE job_id = ?", (job_id,))
+        conn.commit()
+
+
+def read_json_artifact(path: Path, default=None):
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def load_processing_jobs():
+    with get_db_connection() as conn:
+        rows = conn.execute("SELECT * FROM processing_jobs ORDER BY created_at").fetchall()
+
+    restored = {}
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+            logs = json.loads(row["logs_json"] or "[]")
+        except json.JSONDecodeError:
+            continue
+        job = {
+            **payload,
+            "job_id": row["job_id"],
+            "status": row["status"],
+            "stage": row["stage"],
+            "progress": row["progress"],
+            "message": row["message"],
+            "logs": logs,
+            "error_message": row["error_message"],
+        }
+        meta_dir = Path(job.get("meta_dir", WORK_ROOT / row["job_id"] / "meta"))
+        report_dir = Path(job.get("report_dir", WORK_ROOT / row["job_id"] / "report"))
+        job["result"] = read_json_artifact(meta_dir / "result.json")
+        job["original_result"] = read_json_artifact(meta_dir / "original_result.json")
+        job["refined_result"] = read_json_artifact(meta_dir / "refined_result.json")
+        job["stt_corrections"] = read_json_artifact(
+            meta_dir / "stt_corrections.json", {"corrections": []}
+        )
+        job["speaker_matches"] = read_json_artifact(
+            meta_dir / "speaker_matches.json", {"matches": []}
+        )
+        job["speaker_mapping"] = {
+            str(item["speaker_id"]): item["participant_match"]
+            for item in job["speaker_matches"].get("matches", [])
+            if "speaker_id" in item and "participant_match" in item
+        }
+        report_path = report_dir / "meeting_report.md"
+        if report_path.exists():
+            job["meeting_report"] = report_path.read_text(encoding="utf-8").strip()
+        restored[row["job_id"]] = job
+
+    with jobs_lock:
+        jobs.update(restored)
+
+
 def set_job(job_id: str, **updates):
     with jobs_lock:
-        job = jobs[job_id]
+        job = jobs.get(job_id)
+        if not job:
+            return
         job.update(updates)
         if {"stage", "progress", "message"}.issubset(updates):
             append_job_log(job, updates["stage"], updates["progress"], updates["message"])
+    persist_job(job_id)
 
 
 def progress_callback(job_id: str):
@@ -994,22 +1148,104 @@ def parse_participants(text: str):
     return [item.strip() for item in normalized.splitlines() if item.strip()]
 
 
-def run_job(job_id: str):
-    set_job(job_id, status="running", stage="starting", progress=1, message="처리를 시작합니다.")
+def write_json_artifact(path: Path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    temporary_path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary_path.replace(path)
+
+
+def next_pipeline_stage(job_id: str):
     with jobs_lock:
         job = jobs[job_id]
-        audio_path = Path(job["audio_path"])
-        output_dir = Path(job["meta_dir"])
+        return "llm" if job.get("result") else "gpu"
+
+
+def submit_pipeline_stage(job_id: str):
+    if next_pipeline_stage(job_id) == "llm":
+        set_job(job_id, status="running", stage="llm_queued", progress=88,
+                message="LLM 후처리 대기 중입니다.")
+        llm_executor.submit(run_llm_job, job_id)
+    else:
+        set_job(job_id, status="queued", stage="gpu_queued", progress=0,
+                message="GPU 분석 대기 중입니다.")
+        gpu_executor.submit(run_gpu_job, job_id)
+
+
+def admit_pipeline_job(job_id: str):
+    submit_now = False
+    with jobs_lock:
+        if len(active_job_ids) < MAX_ACTIVE_JOBS:
+            active_job_ids.add(job_id)
+            submit_now = True
+        elif len(pending_job_ids) < MAX_QUEUED_JOBS:
+            pending_job_ids.append(job_id)
+            job = jobs[job_id]
+            job.update(status="queued", stage="capacity_queued", progress=0,
+                       message="서버 작업 슬롯 대기 중입니다.")
+            append_job_log(job, job["stage"], job["progress"], job["message"])
+        else:
+            return False
+    persist_job(job_id)
+    if submit_now:
+        submit_pipeline_stage(job_id)
+    return True
+
+
+def finish_pipeline_job(job_id: str):
+    next_job_id = None
+    with jobs_lock:
+        active_job_ids.discard(job_id)
+        while pending_job_ids:
+            candidate = pending_job_ids.popleft()
+            if candidate in jobs:
+                active_job_ids.add(candidate)
+                next_job_id = candidate
+                break
+    if next_job_id:
+        submit_pipeline_stage(next_job_id)
+
+
+def run_gpu_job(job_id: str):
+    set_job(job_id, status="running", stage="gpu_starting", progress=1,
+            message="GPU 분석을 시작합니다.")
+    with jobs_lock:
+        job = dict(jobs[job_id])
     try:
-        result = transcribe_meeting(audio_path, output_dir, progress_callback(job_id))
-        participant_list = job.get("participants", [])
+        result = transcribe_meeting(
+            Path(job["audio_path"]), Path(job["meta_dir"]), progress_callback(job_id)
+        )
+        write_json_artifact(Path(job["meta_dir"]) / "result.json", result)
+        set_job(job_id, result=result)
+        submit_pipeline_stage(job_id)
+    except Exception as exc:
+        set_job(job_id, status="failed", stage="gpu_failed", progress=100,
+                message=str(exc), error_message=str(exc))
+        finish_pipeline_job(job_id)
+
+
+def run_llm_job(job_id: str):
+    set_job(job_id, status="running", stage="llm_running", progress=89,
+            message="LLM 후처리를 시작합니다.")
+    with jobs_lock:
+        job = dict(jobs[job_id])
+    try:
+        result = job.get("result") or read_json_artifact(Path(job["meta_dir"]) / "result.json")
+        if not result:
+            raise RuntimeError("GPU 분석 결과를 찾지 못했습니다.")
         postprocess = run_llm_postprocess(
             result,
-            output_dir,
-            participant_list,
+            Path(job["meta_dir"]),
+            job.get("participants", []),
             job.get("meeting_purpose", ""),
             job.get("meeting_reference_text", ""),
             progress_callback(job_id),
+            job_id,
+        )
+        corrected_result = {**result, "sentences": postprocess["corrected_sentences"]}
+        write_json_artifact(Path(job["meta_dir"]) / "result.json", corrected_result)
+        write_json_artifact(
+            Path(job["meta_dir"]) / "stt_corrections.json", postprocess["stt_corrections"]
         )
         speaker_mapping = {
             str(match["speaker_id"]): match["participant_match"]
@@ -1019,20 +1255,43 @@ def run_job(job_id: str):
         set_job(
             job_id,
             status="completed",
-            stage="completed",
+            stage="mapping_review",
             progress=100,
             message="처리가 완료되었습니다. 화자 매핑을 확인하세요.",
-            result={**result, "sentences": postprocess["corrected_sentences"]},
+            result=corrected_result,
             original_result=postprocess["original_sentences"],
             refined_result=postprocess["refined_sentences"],
             stt_corrections=postprocess["stt_corrections"],
             speaker_matches=postprocess["speaker_matches"],
             speaker_mapping=speaker_mapping,
+            error_message=None,
         )
-    except Exception as exc:  # noqa: BLE001 - job errors should surface to API users.
-        set_job(job_id, status="failed", stage="failed", progress=100, message=str(exc))
+    except Exception as exc:
+        set_job(job_id, status="failed", stage="llm_failed", progress=100,
+                message=str(exc), error_message=str(exc))
     finally:
-        release_gpu_memory("job finished")
+        finish_pipeline_job(job_id)
+
+
+def recover_processing_jobs():
+    with jobs_lock:
+        recoverable = [
+            job_id for job_id, job in jobs.items()
+            if job.get("status") in {"queued", "running"}
+        ]
+        reports = [
+            (job_id, job.get("report_instruction", ""))
+            for job_id, job in jobs.items()
+            if job.get("report_status") in {"queued", "running"}
+        ]
+    for job_id in recoverable:
+        set_job(job_id, status="queued", message="서버 재시작 후 작업을 복구하고 있습니다.")
+        if not admit_pipeline_job(job_id):
+            set_job(job_id, status="failed", stage="recovery_failed", progress=100,
+                    message="복구 대기열 용량을 초과했습니다.")
+    for job_id, instruction in reports:
+        set_job(job_id, report_status="queued")
+        llm_executor.submit(run_report_job, job_id, instruction)
 
 
 @app.post("/api/auth/login")
@@ -1850,10 +2109,23 @@ def create_job(
             "meeting_reference_text": combined_reference_text,
             "meeting_report": "",
             "report_finalized": False,
+            "report_status": "idle",
+            "report_error": "",
+            "report_instruction": "",
             "persisted": False,
+            "created_at": datetime.now(KST).isoformat(),
         }
 
-    executor.submit(run_job, job_id)
+    persist_job(job_id)
+    if not admit_pipeline_job(job_id):
+        with jobs_lock:
+            jobs.pop(job_id, None)
+        delete_processing_job(job_id)
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise HTTPException(
+            status_code=429,
+            detail="현재 분석 대기열이 가득 찼습니다. 잠시 후 다시 시도하세요.",
+        )
     return get_job(job_id, authorization)
 
 
@@ -1953,16 +2225,51 @@ def update_speaker_mapping(
         output_dir,
         speaker_matches,
     )
-    with jobs_lock:
-        job["result"] = base_result
-        job["speaker_mapping"] = request.mapping
-        job["speaker_matches"] = updated_matches
-        job["refined_result"] = mapped_sentences
+    write_json_artifact(output_dir / "result.json", base_result)
+    set_job(
+        job_id,
+        result=base_result,
+        speaker_mapping=request.mapping,
+        speaker_matches=updated_matches,
+        refined_result=mapped_sentences,
+    )
 
     return {"job_id": job_id, "sentences": mapped_sentences, "speaker_matches": updated_matches}
 
 
-@app.post("/api/jobs/{job_id}/report")
+def run_report_job(job_id: str, special_instruction: str):
+    set_job(job_id, report_status="running", report_error="")
+    with jobs_lock:
+        job = dict(jobs.get(job_id, {}))
+    try:
+        sentences = job.get("refined_result")
+        if not sentences:
+            raise RuntimeError("화자 매핑 결과를 찾지 못했습니다.")
+        transcript_text = format_transcript(sentences)
+        if not transcript_text:
+            raise RuntimeError("회의 발화 내용이 없습니다.")
+        prompt = build_prompt(transcript_text, special_instruction)
+        report_markdown = generate_report(
+            prompt,
+            context={"job_id": job_id, "stage": "report_generation"},
+        ).strip()
+        output_dir = Path(job.get("report_dir", job["output_dir"]))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "meeting_report.md").write_text(
+            report_markdown + "\n", encoding="utf-8"
+        )
+        set_job(
+            job_id,
+            meeting_report=report_markdown,
+            report_finalized=False,
+            report_status="completed",
+            report_error="",
+        )
+    except Exception as exc:
+        set_job(job_id, report_status="failed", report_error=str(exc))
+
+
+@app.post("/api/jobs/{job_id}/report", status_code=202)
 def create_report(
     job_id: str,
     request: ReportRequest,
@@ -1973,28 +2280,31 @@ def create_report(
         job = jobs.get(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found.")
-        sentences = job.get("refined_result")
-        output_dir = Path(job.get("report_dir", job["output_dir"]))
+        if not job.get("refined_result"):
+            raise HTTPException(status_code=409, detail="Speaker mapping result is not ready.")
+        if job.get("report_status") in {"queued", "running"}:
+            return {"job_id": job_id, "status": job["report_status"]}
+        job["report_status"] = "queued"
+        job["report_error"] = ""
+        job["report_instruction"] = request.special_instruction
+    persist_job(job_id)
+    llm_executor.submit(run_report_job, job_id, request.special_instruction)
+    return {"job_id": job_id, "status": "queued"}
 
-    if not sentences:
-        raise HTTPException(status_code=409, detail="Speaker mapping result is not ready.")
 
-    transcript_text = format_transcript(sentences)
-    if not transcript_text:
-        raise HTTPException(status_code=409, detail="No transcript content found.")
-
-    prompt = build_prompt(transcript_text, request.special_instruction)
-    report_markdown = generate_report(prompt).strip()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "meeting_report.md").write_text(report_markdown + "\n", encoding="utf-8")
-
+@app.get("/api/jobs/{job_id}/report")
+def get_report_status(job_id: str, authorization: str | None = Header(default=None)):
+    require_job_owner(job_id, authorization)
     with jobs_lock:
-        job = jobs[job_id]
-        job["meeting_report"] = report_markdown
-        job["report_finalized"] = False
-
-    release_gpu_memory("report generated")
-    return {"job_id": job_id, "report_markdown": report_markdown}
+        job = jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found.")
+        return {
+            "job_id": job_id,
+            "status": job.get("report_status", "idle"),
+            "report_markdown": job.get("meeting_report", ""),
+            "error": job.get("report_error", ""),
+        }
 
 
 @app.post("/api/jobs/{job_id}/report/finalize")
@@ -2022,7 +2332,7 @@ def finalize_report(
         job["meeting_report"] = report_markdown
         job["report_finalized"] = True
 
-    release_gpu_memory("report finalized")
+    persist_job(job_id)
     return {"job_id": job_id, "report_markdown": report_markdown, "finalized": True}
 
 
@@ -2093,6 +2403,7 @@ def complete_job(job_id: str, authorization: str | None = Header(default=None)):
         job["persisted"] = True
         job["persist_dir"] = str(persist_dir)
         job["work_dir_deleted"] = True
+    delete_processing_job(job_id)
 
     return {"job_id": job_id, "persisted": True}
 
@@ -2143,6 +2454,12 @@ def delete_meeting_report(job_id: str, authorization: str | None = Header(defaul
     shutil.rmtree(WORK_ROOT / job_id, ignore_errors=True)
     with jobs_lock:
         jobs.pop(job_id, None)
+        active_job_ids.discard(job_id)
+        try:
+            pending_job_ids.remove(job_id)
+        except ValueError:
+            pass
+    delete_processing_job(job_id)
     return {"deleted": True}
 
 

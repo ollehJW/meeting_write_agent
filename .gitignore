@@ -29,6 +29,7 @@ jobs/
 .jobs_work/
 backend/workspace/
 backend/.secrets/
+backend/logs/
 
 # Audio and generated meeting artifacts
 *.m4a

@@ -60,6 +60,35 @@ sudo loginctl enable-linger wia
 systemctl --user restart meeting-write-backend.service meeting-write-frontend.service
 ```
 
+
+## 분석 동시 처리 설정
+
+보수적인 기본 운영값은 프로젝트 루트의 `.env`에서 관리한다.
+
+```ini
+GPU_WORKERS=1
+LLM_WORKERS=3
+MAX_ACTIVE_JOBS=6
+MAX_QUEUED_JOBS=10
+LLM_CONNECT_TIMEOUT_SECONDS=10
+LLM_READ_TIMEOUT_SECONDS=180
+LLM_MAX_RETRIES=4
+LLM_RETRY_BASE_SECONDS=2
+LLM_MAX_RETRY_DELAY_SECONDS=60
+```
+
+- GPU 분석은 한 번에 1건만 실행한다.
+- STT 교정, 화자 매칭, 회의록 작성 LLM 작업은 합계 최대 3건까지 실행한다.
+- 분석 파이프라인은 활성 6건, 추가 대기 10건까지 수용하며 초과 요청은 HTTP 429로 거절한다.
+- 작업 상태는 `backend/app.db`의 `processing_jobs`에 저장되며 백엔드 재시작 후 복구된다.
+- LLM 호출 결과 메타데이터는 `backend/logs/llm_calls.jsonl`에 기록된다. 프롬프트와 회의 내용은 기록하지 않는다.
+
+값을 변경한 뒤에는 백엔드 서비스를 재시작한다.
+
+```bash
+systemctl --user restart meeting-write-backend.service
+```
+
 ## Confluence Access Token 암호화
 
 Confluence Access Token은 DB의 `confluence_settings.token_encrypted` 컬럼에 Fernet 방식으로 암호화되어 저장된다.

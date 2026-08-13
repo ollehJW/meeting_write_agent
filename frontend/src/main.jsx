@@ -2690,9 +2690,23 @@ function App() {
         body: JSON.stringify({ special_instruction: reportInstruction }),
       });
       if (!response.ok) throw await apiError(response, '회의록 생성에 실패했습니다.');
-      const data = await response.json();
-      setReportMarkdown(data.report_markdown || '');
-      setModalMode('report_review');
+
+      while (true) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+        const statusResponse = await apiFetch(`/api/jobs/${job.job_id}/report`);
+        if (!statusResponse.ok) {
+          throw await apiError(statusResponse, '회의록 생성 상태 확인에 실패했습니다.');
+        }
+        const data = await statusResponse.json();
+        if (data.status === 'completed') {
+          setReportMarkdown(data.report_markdown || '');
+          setModalMode('report_review');
+          break;
+        }
+        if (data.status === 'failed') {
+          throw new Error(data.error || '회의록 생성에 실패했습니다.');
+        }
+      }
     } catch (err) {
       setError(err.message);
     } finally {
