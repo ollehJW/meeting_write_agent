@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import QRCode from 'qrcode';
-import { AlertTriangle, BarChart3, Building2, CalendarDays, CheckCircle2, Clock3, Download, FileText, GripVertical, Home, Info, KeyRound, Tags, LogIn, LogOut, Mic2, Pause, Pencil, Play, Plus, Settings, ShieldCheck, Square, Trash2, Trophy, UploadCloud, UserRound, UserPlus, X } from 'lucide-react';
+import { AlertTriangle, BarChart3, Building2, CalendarDays, CheckCircle2, Clock3, Download, Eye, EyeOff, FileText, GripVertical, Home, Info, KeyRound, Tags, LogIn, LogOut, Mic2, Pause, Pencil, Play, Plus, Settings, ShieldCheck, Square, Trash2, Trophy, UploadCloud, UserRound, UserPlus, X } from 'lucide-react';
 import './styles.css';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '';
@@ -18,7 +18,20 @@ const USER_GUIDE_MARKDOWN = `# 사용 가이드
 - 드래그로 카테고리 순서를 바꿀 수 있습니다.
 - 사용하지 않는 카테고리는 삭제할 수 있지만, 이미 저장된 회의록 분류 기준과 연결될 수 있으니 신중히 관리합니다.
 
-## 2. 회의 녹음
+## 2. Confluence 연동
+
+**설정 > Confluence 관리**에서 회의록을 저장할 Confluence 상위 페이지와 Access Token을 연결합니다.
+
+Access Token은 Confluence에서 아래 경로로 발급할 수 있습니다.
+
+1. 프로필
+2. 환경설정
+3. 개인용 엑세스 토큰
+4. 토큰 만들기
+
+발급한 Access Token과 회의록 저장 페이지 URL을 입력한 뒤 **연결 테스트**를 실행하면 연동 상태가 저장됩니다. 저장된 Access Token은 서버 DB에 암호화되어 보관됩니다.
+
+## 3. 회의 녹음
 
 **회의 녹음** 메뉴에서 현재 접속한 컴퓨터의 마이크로 바로 녹음할 수 있습니다.
 
@@ -29,7 +42,7 @@ const USER_GUIDE_MARKDOWN = `# 사용 가이드
 - 회의록 생성 화면의 **보관 녹음 불러오기**에서 보관된 녹음을 미리 재생해보고 회의 녹음 파일로 연결할 수 있습니다.
 - PC 화면에서는 **다운로드**로 녹음 파일을 저장할 수 있으며, 모바일 화면은 보안 정책에 따라 녹음 파일 다운로드를 제공하지 않습니다.
 
-## 3. 회의록 생성 프로세스
+## 4. 회의록 생성 프로세스
 
 회의록 생성은 업로드된 오디오와 입력한 회의 정보를 기준으로 순차 실행됩니다.
 
@@ -68,7 +81,7 @@ const USER_GUIDE_MARKDOWN = `# 사용 가이드
 
 확정 저장된 회의록은 회의록 라운지에 보관되며, 이후 다시 열람하거나 다운로드할 수 있습니다.
 
-## 4. 회의록 라운지 활용법
+## 5. 회의록 라운지 활용법
 
 **회의록 라운지**는 확정 저장된 회의록을 다시 찾고 검토하는 공간입니다.
 
@@ -106,6 +119,16 @@ function matchBySpeaker(matchesData, speakerId) {
 async function apiError(response, fallbackMessage) {
   const data = await response.json().catch(() => ({}));
   return new Error(data.detail || fallbackMessage);
+}
+
+
+function displayConfluenceUrl(value) {
+  const text = String(value || '');
+  try {
+    return decodeURI(text);
+  } catch {
+    return text;
+  }
 }
 
 function MarkdownReport({ markdown }) {
@@ -1089,6 +1112,19 @@ function App() {
   const [editingContent, setEditingContent] = useState('');
   const [editingSpeaker, setEditingSpeaker] = useState('');
   const [selectedSpeakerFilter, setSelectedSpeakerFilter] = useState('all');
+  const [confluenceForm, setConfluenceForm] = useState({
+    page_url: '',
+    token: '',
+    enabled: false,
+  });
+  const [confluenceSettings, setConfluenceSettings] = useState(null);
+  const [isLoadingConfluenceSettings, setIsLoadingConfluenceSettings] = useState(false);
+  const [confluenceError, setConfluenceError] = useState('');
+  const [confluenceUiMessage, setConfluenceUiMessage] = useState('');
+  const [isTestingConfluence, setIsTestingConfluence] = useState(false);
+  const [isDisconnectingConfluence, setIsDisconnectingConfluence] = useState(false);
+  const [confluenceTestSuccess, setConfluenceTestSuccess] = useState(null);
+  const [showConfluenceToken, setShowConfluenceToken] = useState(false);
   const pollRef = useRef(null);
   const processRef = useRef(null);
   const logBodyRef = useRef(null);
@@ -1101,6 +1137,16 @@ function App() {
   const isMobileRoute = mobilePath === '/mobile' || mobilePath.startsWith('/mobile/');
   const mobileView = getMobileViewFromPath(mobilePath);
   const mobilePlatform = useMemo(() => detectMobilePlatform(), []);
+  const settingsTitle = {
+    members: '멤버 관리',
+    categories: '카테고리 관리',
+    confluence: 'Confluence 관리',
+  }[settingsTab] || '설정';
+  const settingsDescription = {
+    members: '회의 참석자 빠른 추가에 사용할 우리 팀 인원을 관리합니다.',
+    categories: '회의록을 분류할 카테고리를 관리합니다.',
+    confluence: '회의록을 Confluence에 연동하기 위한 설정을 관리합니다.',
+  }[settingsTab] || '';
 
   const speakerIds = useMemo(() => speakerIdsFromResult(result), [result]);
   const filteredSentences = useMemo(() => {
@@ -1637,6 +1683,39 @@ function App() {
       loadCategories();
     }
   }, [currentView, authToken, isMobileRoute, mobileView]);
+
+  useEffect(() => {
+    if (!authToken || currentView !== 'settings' || settingsTab !== 'confluence') return;
+    loadConfluenceSettings();
+  }, [currentView, settingsTab, authToken]);
+
+  async function loadConfluenceSettings() {
+    setIsLoadingConfluenceSettings(true);
+    setConfluenceError('');
+    setConfluenceUiMessage('');
+    try {
+      const response = await fetch(API_BASE + '/api/confluence-settings', { headers: authHeaders() });
+      if (response.status === 401) {
+        handleExpiredSession();
+        return;
+      }
+      if (!response.ok) throw await apiError(response, 'Confluence 설정을 불러오지 못했습니다.');
+      const data = await response.json();
+      setConfluenceSettings(data);
+      if (data.setting) {
+        setConfluenceForm((prev) => ({
+          ...prev,
+          page_url: displayConfluenceUrl(data.setting.page_url),
+          enabled: Boolean(data.setting.enabled),
+          token: '',
+        }));
+      }
+    } catch (err) {
+      setConfluenceError(err.message);
+    } finally {
+      setIsLoadingConfluenceSettings(false);
+    }
+  }
 
   async function loadLoungeReports() {
     setIsLoadingLounge(true);
@@ -2295,6 +2374,95 @@ function App() {
     }
   }
 
+  function updateConfluenceForm(field, value) {
+    setConfluenceForm((prev) => ({ ...prev, [field]: field === 'page_url' ? displayConfluenceUrl(value) : value }));
+    setConfluenceUiMessage('');
+  }
+
+  async function testConfluenceConnection(event) {
+    event?.preventDefault();
+    setConfluenceError('');
+    setConfluenceUiMessage('');
+    setIsTestingConfluence(true);
+    try {
+      const response = await fetch(API_BASE + '/api/confluence-settings/test-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({
+          page_url: displayConfluenceUrl(confluenceForm.page_url),
+          token: confluenceForm.token,
+        }),
+      });
+      if (response.status === 401) {
+        handleExpiredSession();
+        return;
+      }
+      if (!response.ok) throw await apiError(response, 'Confluence 연결 테스트에 실패했습니다.');
+      const data = await response.json();
+      setConfluenceTestSuccess(data);
+    } catch (err) {
+      setConfluenceError(err.message);
+    } finally {
+      setIsTestingConfluence(false);
+    }
+  }
+
+  async function closeConfluenceSuccessModal() {
+    setConfluenceTestSuccess(null);
+    await loadConfluenceSettings();
+  }
+
+
+  async function recheckConfluenceConnection() {
+    setConfluenceError('');
+    setConfluenceUiMessage('');
+    setIsTestingConfluence(true);
+    try {
+      const response = await fetch(API_BASE + '/api/confluence-settings/retest', {
+        method: 'POST',
+        headers: authHeaders(),
+      });
+      if (response.status === 401) {
+        handleExpiredSession();
+        return;
+      }
+      if (!response.ok) throw await apiError(response, 'Confluence 연동 체크에 실패했습니다.');
+      const data = await response.json();
+      setConfluenceTestSuccess(data);
+    } catch (err) {
+      const message = err.message;
+      await loadConfluenceSettings();
+      setConfluenceError(message);
+    } finally {
+      setIsTestingConfluence(false);
+    }
+  }
+
+  async function disconnectConfluenceConnection() {
+    if (!window.confirm('Confluence 연동을 해제할까요? 저장된 Access Token 정보가 삭제됩니다.')) return;
+    setConfluenceError('');
+    setConfluenceUiMessage('');
+    setIsDisconnectingConfluence(true);
+    try {
+      const response = await fetch(API_BASE + '/api/confluence-settings', {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
+      if (response.status === 401) {
+        handleExpiredSession();
+        return;
+      }
+      if (!response.ok) throw await apiError(response, 'Confluence 연동 해제에 실패했습니다.');
+      setConfluenceForm((prev) => ({ ...prev, page_url: '', token: '', enabled: false }));
+      await loadConfluenceSettings();
+      setConfluenceUiMessage('Confluence 연동을 해제했습니다.');
+    } catch (err) {
+      setConfluenceError(err.message);
+    } finally {
+      setIsDisconnectingConfluence(false);
+    }
+  }
+
   async function uploadAndRun() {
     const uploadAudioFile = activeMeetingAudioFile;
     if (!uploadAudioFile) return;
@@ -2840,6 +3008,7 @@ function App() {
           <div className={`side-subnav ${currentView === 'settings' ? 'open' : ''}`}>
             <button className={`side-subitem ${currentView === 'settings' && settingsTab === 'members' ? 'active' : ''}`} onClick={() => { setSettingsTab('members'); setCurrentView('settings'); }}>멤버 관리</button>
             <button className={`side-subitem ${currentView === 'settings' && settingsTab === 'categories' ? 'active' : ''}`} onClick={() => { setSettingsTab('categories'); setCurrentView('settings'); }}>카테고리 관리</button>
+            <button className={`side-subitem ${currentView === 'settings' && settingsTab === 'confluence' ? 'active' : ''}`} onClick={() => { setSettingsTab('confluence'); setCurrentView('settings'); }}>Confluence 관리</button>
           </div>
           {authUser.role === 'admin' && (
             <button className={`side-item ${currentView === 'accounts' ? 'active' : ''}`} onClick={() => setCurrentView('accounts')}><ShieldCheck size={17} /><span className="side-name">계정 권한</span></button>
@@ -3505,8 +3674,8 @@ function App() {
               <div className="settings-page-head">
                 <div>
                   <span>Workspace Settings</span>
-                  <h2>{settingsTab === "members" ? "멤버 관리" : "카테고리 관리"}</h2>
-                  <p>{settingsTab === "members" ? "회의 참석자 빠른 추가에 사용할 우리 팀 인원을 관리합니다." : "회의록을 분류할 카테고리를 관리합니다."}</p>
+                  <h2>{settingsTitle}</h2>
+                  <p>{settingsDescription}</p>
                 </div>
               </div>
 
@@ -3636,6 +3805,80 @@ function App() {
                       {isLoadingCategories && <div className="account-empty">카테고리 목록을 불러오는 중입니다.</div>}
                     </div>
                   </section>
+                </div>
+              </div>
+              )}
+
+              {settingsTab === "confluence" && (
+              <div className="settings-section">
+                <div className="confluence-stack">
+                {isLoadingConfluenceSettings && <div className="confluence-status-card neutral">Confluence 연동 상태를 확인하는 중입니다.</div>}
+                {confluenceError && <div className="error-box account-alert">{confluenceError}</div>}
+                {!isLoadingConfluenceSettings && confluenceSettings?.is_connected && (
+                  <div className="confluence-status-card connected">
+                    <div>
+                      <span>연동 완료</span>
+                      <b>Confluence가 연동되었습니다.</b>
+                      <p>마지막 연결 테스트가 성공한 계정입니다.</p>
+                    </div>
+                    <dl>
+                      <div><dt>저장 페이지</dt><dd>{displayConfluenceUrl(confluenceSettings.setting?.page_url) || '-'}</dd></div>
+                      <div><dt>인증 방식</dt><dd>Access Token</dd></div>
+                      <div><dt>마지막 테스트</dt><dd>{confluenceSettings.setting?.last_tested_at ? String(confluenceSettings.setting.last_tested_at).slice(0, 16).replace('T', ' ') : '-'}</dd></div>
+                    </dl>
+                    <div className="confluence-connected-actions">
+                      <button className="line-btn" type="button" onClick={recheckConfluenceConnection} disabled={isTestingConfluence || isDisconnectingConfluence}>
+                        {isTestingConfluence && <span className="btn-spinner blue" aria-hidden="true"></span>}
+                        {isTestingConfluence ? '체크 중' : '연동 체크'}
+                      </button>
+                      <button className="line-btn danger-line-btn" type="button" onClick={disconnectConfluenceConnection} disabled={isTestingConfluence || isDisconnectingConfluence}>
+                        {isDisconnectingConfluence ? '해제 중' : '연동 해제'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {!isLoadingConfluenceSettings && !confluenceSettings?.is_connected && (
+                  <>
+                    <div className="confluence-required-note">
+                      <b>Confluence 연동이 필요합니다.</b>
+                      <p>회의록 저장 페이지 URL과 Access Token을 입력하세요.</p>
+                    </div>
+                    <form className="confluence-settings-panel" onSubmit={testConfluenceConnection}>
+                      <div className="confluence-form-grid">
+                        <label className="account-field confluence-wide-field">
+                          <span>회의록 저장 페이지 URL</span>
+                          <input
+                            value={confluenceForm.page_url}
+                            onChange={(event) => updateConfluenceForm('page_url', event.target.value)}
+                            placeholder="예) https://confluence.hmg-corp.io/spaces/SPACEID/pages/PAGEID"
+                          />
+                        </label>
+                        <label className="account-field confluence-wide-field">
+                          <span>Access Token</span>
+                          <div className="secret-input-wrap">
+                            <input
+                              type={showConfluenceToken ? 'text' : 'password'}
+                              value={confluenceForm.token}
+                              onChange={(event) => updateConfluenceForm('token', event.target.value)}
+                              placeholder="Access Token 입력"
+                              autoComplete="off"
+                            />
+                            <button className="secret-toggle-btn" type="button" onClick={() => setShowConfluenceToken((prev) => !prev)} aria-label={showConfluenceToken ? 'Access Token 숨기기' : 'Access Token 보기'}>
+                              {showConfluenceToken ? <EyeOff size={16} /> : <Eye size={16} />}
+                            </button>
+                          </div>
+                        </label>
+                      </div>
+                      {confluenceUiMessage && <div className="account-message">{confluenceUiMessage}</div>}
+                      <div className="confluence-actions">
+                        <button className="primary-btn" type="submit" disabled={isTestingConfluence}>
+                          {isTestingConfluence && <span className="btn-spinner" aria-hidden="true"></span>}
+                          {isTestingConfluence ? '테스트 중' : '연결 테스트'}
+                        </button>
+                      </div>
+                    </form>
+                  </>
+                )}
                 </div>
               </div>
               )}
@@ -3916,6 +4159,31 @@ function App() {
             </article>
           </div>
         </section>
+      )}
+
+      {confluenceTestSuccess && (
+        <div className="draft-modal-backdrop open" onClick={closeConfluenceSuccessModal}>
+          <section className="draft-modal confluence-success-modal" role="dialog" aria-modal="true" aria-label="Confluence 연결 테스트 성공" onClick={(event) => event.stopPropagation()}>
+            <div className="draft-modal-head">
+              <div>
+                <span>Connection Test</span>
+                <h3>Confluence 연결 성공</h3>
+                <p>입력한 Access Token으로 저장 페이지 접근을 확인했습니다.</p>
+              </div>
+              <button className="icon-btn" type="button" onClick={closeConfluenceSuccessModal} aria-label="Confluence 연결 성공 닫기"><X size={18} /></button>
+            </div>
+            <div className="confluence-success-body">
+              <CheckCircle2 size={26} />
+              <div>
+                <b>{confluenceTestSuccess.page_title || 'Confluence 페이지'}</b>
+                <small>{confluenceTestSuccess.space_key ? `${confluenceTestSuccess.space_key} / ${confluenceTestSuccess.page_id}` : confluenceTestSuccess.page_id}</small>
+              </div>
+            </div>
+            <div className="draft-modal-actions single">
+              <button className="primary-btn" type="button" onClick={closeConfluenceSuccessModal}>닫기</button>
+            </div>
+          </section>
+        </div>
       )}
 
       <div className={`modal-backdrop ${modalOpen ? 'open' : ''}`} onClick={() => setModalOpen(false)} />

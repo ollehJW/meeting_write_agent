@@ -8,17 +8,19 @@ import sqlite3
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from urllib import error as urllib_error, request as urllib_request
 from pathlib import Path
 from datetime import datetime, timedelta
 from threading import Event, Lock, Thread
 from zoneinfo import ZoneInfo
 from typing import Literal
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
+from cryptography.fernet import Fernet, InvalidToken
 
 from .processor import apply_speaker_mapping, release_gpu_memory, run_llm_postprocess, transcribe_meeting
 from .read import SUPPORTED_EXTENSIONS, read_text
@@ -29,6 +31,7 @@ JOB_ROOT = BASE_DIR / "jobs"
 WORK_ROOT = BASE_DIR / ".jobs_work"
 BACKEND_WORKSPACE_ROOT = BASE_DIR / "backend" / "workspace"
 APP_DB_PATH = BASE_DIR / "backend" / "app.db"
+CONFLUENCE_SECRET_KEY_PATH = BASE_DIR / "backend" / ".secrets" / "confluence_fernet.key"
 JOB_ROOT.mkdir(exist_ok=True)
 WORK_ROOT.mkdir(exist_ok=True)
 BACKEND_WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
@@ -36,6 +39,7 @@ KST = ZoneInfo("Asia/Seoul")
 WORK_CLEANUP_HOUR = 5
 RECORDING_DRAFT_RETENTION_DAYS = 7
 INITIAL_PASSWORD = "wia1234!"
+CONFLUENCE_TOKEN_PREFIX = "fernet:"
 
 cleanup_stop_event = Event()
 cleanup_thread: Thread | None = None
@@ -57,6 +61,51 @@ def hash_password(password: str, salt: str | None = None):
 def verify_password(password: str, salt: str, password_hash: str):
     _, digest = hash_password(password, salt)
     return secrets.compare_digest(digest, password_hash)
+
+
+def get_confluence_secret_key():
+    env_key = os.getenv("WIAMEET_CONFLUENCE_SECRET_KEY", "").strip()
+    if env_key:
+        return env_key.encode("utf-8")
+
+    CONFLUENCE_SECRET_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if CONFLUENCE_SECRET_KEY_PATH.exists():
+        return CONFLUENCE_SECRET_KEY_PATH.read_bytes().strip()
+
+    key = Fernet.generate_key()
+    CONFLUENCE_SECRET_KEY_PATH.write_bytes(key)
+    CONFLUENCE_SECRET_KEY_PATH.chmod(0o600)
+    return key
+
+
+def get_confluence_cipher():
+    try:
+        return Fernet(get_confluence_secret_key())
+    except ValueError as exc:
+        raise RuntimeError("Invalid WIAMEET_CONFLUENCE_SECRET_KEY for Confluence token encryption.") from exc
+
+
+def encrypt_confluence_token(token: str):
+    token = token.strip()
+    if not token:
+        return ""
+    if token.startswith(CONFLUENCE_TOKEN_PREFIX):
+        return token
+    encrypted = get_confluence_cipher().encrypt(token.encode("utf-8")).decode("utf-8")
+    return CONFLUENCE_TOKEN_PREFIX + encrypted
+
+
+def decrypt_confluence_token(value: str):
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if not value.startswith(CONFLUENCE_TOKEN_PREFIX):
+        return value
+    encrypted = value.removeprefix(CONFLUENCE_TOKEN_PREFIX).encode("utf-8")
+    try:
+        return get_confluence_cipher().decrypt(encrypted).decode("utf-8")
+    except InvalidToken as exc:
+        raise HTTPException(status_code=500, detail="Confluence Access Token 복호화에 실패했습니다. 암호화 키를 확인하세요.") from exc
 
 
 def get_db_connection():
@@ -307,6 +356,83 @@ def create_meeting_reports_table(conn, table_name: str = "meeting_reports"):
     )
 
 
+def create_confluence_settings_table(conn, table_name: str = "confluence_settings"):
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
+            setting_uuid TEXT PRIMARY KEY,
+            user_uuid TEXT NOT NULL UNIQUE,
+            page_url TEXT NOT NULL DEFAULT '',
+            token_encrypted TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_tested_at TEXT,
+            last_test_status TEXT,
+            FOREIGN KEY(user_uuid) REFERENCES users(user_uuid)
+        )
+        """
+    )
+
+
+def migrate_confluence_settings_table(conn):
+    if not table_exists(conn, "confluence_settings"):
+        create_confluence_settings_table(conn)
+        return
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(confluence_settings)").fetchall()}
+    if "username" not in columns and "password_encrypted" not in columns:
+        return
+
+    rows = conn.execute("SELECT * FROM confluence_settings").fetchall()
+    conn.execute("DROP TABLE IF EXISTS confluence_settings_new")
+    create_confluence_settings_table(conn, "confluence_settings_new")
+    for row in rows:
+        keys = row.keys()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO confluence_settings_new (
+                setting_uuid, user_uuid, page_url, token_encrypted, enabled,
+                created_at, updated_at, last_tested_at, last_test_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["setting_uuid"] if "setting_uuid" in keys and row["setting_uuid"] else uuid.uuid4().hex,
+                row["user_uuid"],
+                row["page_url"] if "page_url" in keys else "",
+                row["token_encrypted"] if "token_encrypted" in keys else "",
+                row["enabled"] if "enabled" in keys else 0,
+                row["created_at"] if "created_at" in keys and row["created_at"] else datetime.now(KST).isoformat(timespec="seconds"),
+                row["updated_at"] if "updated_at" in keys and row["updated_at"] else datetime.now(KST).isoformat(timespec="seconds"),
+                row["last_tested_at"] if "last_tested_at" in keys else None,
+                row["last_test_status"] if "last_test_status" in keys else None,
+            ),
+        )
+    conn.execute("DROP TABLE confluence_settings")
+    conn.execute("ALTER TABLE confluence_settings_new RENAME TO confluence_settings")
+
+
+def migrate_confluence_tokens_encrypted(conn):
+    if not table_exists(conn, "confluence_settings"):
+        return
+
+    rows = conn.execute(
+        "SELECT setting_uuid, token_encrypted FROM confluence_settings WHERE token_encrypted != ''"
+    ).fetchall()
+    for row in rows:
+        token_value = row["token_encrypted"] or ""
+        if token_value.startswith(CONFLUENCE_TOKEN_PREFIX):
+            continue
+        conn.execute(
+            "UPDATE confluence_settings SET token_encrypted = ?, updated_at = ? WHERE setting_uuid = ?",
+            (
+                encrypt_confluence_token(token_value),
+                datetime.now(KST).isoformat(timespec="seconds"),
+                row["setting_uuid"],
+            ),
+        )
+
+
 def create_recording_drafts_table(conn, table_name: str = "recording_drafts"):
     conn.execute(
         f"""
@@ -409,6 +535,7 @@ def migrate_meeting_reports_table(conn):
 
 def init_app_db():
     APP_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    get_confluence_secret_key()
     with get_db_connection() as conn:
         conn.execute("PRAGMA foreign_keys = OFF")
         migrate_users_table(conn)
@@ -417,6 +544,8 @@ def init_app_db():
         migrate_users_category_table(conn)
         migrate_meeting_reports_table(conn)
         migrate_recording_drafts_table(conn)
+        migrate_confluence_settings_table(conn)
+        migrate_confluence_tokens_encrypted(conn)
         conn.execute("PRAGMA foreign_keys = ON")
 
         user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -667,6 +796,11 @@ class ReportFinalizeRequest(BaseModel):
     report_markdown: str
 
 
+class ConfluenceTokenTestRequest(BaseModel):
+    page_url: str
+    token: str
+
+
 class JobStatus(BaseModel):
     job_id: str
     status: Literal["queued", "running", "completed", "failed"]
@@ -869,6 +1003,211 @@ def update_own_password(request: UpdatePasswordRequest, authorization: str | Non
         if token in sessions:
             sessions[token]["user"] = user_data
     return {"user": user_data}
+
+
+@app.get("/api/confluence-settings")
+def get_confluence_settings(authorization: str | None = Header(default=None)):
+    user = get_session_user(authorization)
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT setting_uuid, page_url, enabled, created_at, updated_at,
+                   last_tested_at, last_test_status
+            FROM confluence_settings
+            WHERE user_uuid = ?
+            """,
+            (user["user_uuid"],),
+        ).fetchone()
+
+    if not row:
+        return {
+            "setting": None,
+            "is_connected": False,
+            "last_test_status": None,
+        }
+
+    setting = dict(row)
+    setting["enabled"] = bool(setting.get("enabled"))
+    return {
+        "setting": setting,
+        "is_connected": setting.get("last_test_status") == "success",
+        "last_test_status": setting.get("last_test_status"),
+    }
+
+
+def parse_confluence_page_url(page_url: str):
+    parsed = urlparse(page_url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="Confluence 저장 페이지 URL을 확인하세요.")
+
+    path_parts = [part for part in parsed.path.split("/") if part]
+    page_id = ""
+    if "pages" in path_parts:
+        index = path_parts.index("pages")
+        if index + 1 < len(path_parts) and path_parts[index + 1].isdigit():
+            page_id = path_parts[index + 1]
+
+    if not page_id:
+        query_page_id = parse_qs(parsed.query).get("pageId", [""])[0]
+        if query_page_id.isdigit():
+            page_id = query_page_id
+
+    if not page_id:
+        raise HTTPException(status_code=400, detail="Confluence 페이지 ID를 URL에서 찾지 못했습니다.")
+
+    return f"{parsed.scheme}://{parsed.netloc}", page_id
+
+
+def test_confluence_page_with_token(page_url: str, token: str):
+    base_url, page_id = parse_confluence_page_url(page_url)
+    api_url = f"{base_url}/rest/api/content/{page_id}?expand=space,version"
+    req = urllib_request.Request(
+        api_url,
+        headers={
+            "Authorization": f"Bearer {token.strip()}",
+            "Accept": "application/json",
+            "User-Agent": "WIAMeet/1.0",
+        },
+        method="GET",
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=12) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib_error.HTTPError as exc:
+        if exc.code in {401, 403}:
+            raise HTTPException(status_code=400, detail="Token 인증에 실패했습니다. Token 권한을 확인하세요.") from exc
+        if exc.code == 404:
+            raise HTTPException(status_code=400, detail="저장 페이지를 찾지 못했거나 접근 권한이 없습니다.") from exc
+        raise HTTPException(status_code=400, detail=f"Confluence 연결 테스트 실패: HTTP {exc.code}") from exc
+    except urllib_error.URLError as exc:
+        raise HTTPException(status_code=400, detail=f"Confluence 서버에 연결하지 못했습니다: {exc.reason}") from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Confluence 응답을 해석하지 못했습니다.") from exc
+
+    if str(payload.get("id")) != page_id or payload.get("type") != "page":
+        raise HTTPException(status_code=400, detail="입력한 URL이 Confluence 페이지인지 확인하지 못했습니다.")
+
+    return {
+        "base_url": base_url,
+        "page_id": page_id,
+        "page_title": payload.get("title") or "",
+        "space_key": (payload.get("space") or {}).get("key") or "",
+    }
+
+
+@app.post("/api/confluence-settings/test-token")
+def test_confluence_token_settings(payload: ConfluenceTokenTestRequest, authorization: str | None = Header(default=None)):
+    user = get_session_user(authorization)
+    page_url = payload.page_url.strip()
+    token = payload.token.strip()
+    if not page_url:
+        raise HTTPException(status_code=400, detail="회의록 저장 페이지 URL을 입력하세요.")
+    if not token:
+        raise HTTPException(status_code=400, detail="Token을 입력하세요.")
+
+    test_result = test_confluence_page_with_token(page_url, token)
+    now = datetime.now(KST).isoformat(timespec="seconds")
+    with get_db_connection() as conn:
+        existing = conn.execute(
+            "SELECT setting_uuid FROM confluence_settings WHERE user_uuid = ?",
+            (user["user_uuid"],),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """
+                UPDATE confluence_settings
+                SET page_url = ?, token_encrypted = ?, enabled = 1, updated_at = ?,
+                    last_tested_at = ?, last_test_status = 'success'
+                WHERE user_uuid = ?
+                """,
+                (page_url, encrypt_confluence_token(token), now, now, user["user_uuid"]),
+            )
+            setting_uuid = existing["setting_uuid"]
+        else:
+            setting_uuid = uuid.uuid4().hex
+            conn.execute(
+                """
+                INSERT INTO confluence_settings (
+                    setting_uuid, user_uuid, page_url, token_encrypted,
+                    enabled, created_at, updated_at, last_tested_at, last_test_status
+                ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, 'success')
+                """,
+                (setting_uuid, user["user_uuid"], page_url, encrypt_confluence_token(token), now, now, now),
+            )
+        conn.commit()
+
+    return {
+        "ok": True,
+        "setting_uuid": setting_uuid,
+        "page_url": page_url,
+        "page_id": test_result["page_id"],
+        "page_title": test_result["page_title"],
+        "space_key": test_result["space_key"],
+        "last_tested_at": now,
+    }
+
+
+@app.post("/api/confluence-settings/retest")
+def retest_confluence_settings(authorization: str | None = Header(default=None)):
+    user = get_session_user(authorization)
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT setting_uuid, page_url, token_encrypted
+            FROM confluence_settings
+            WHERE user_uuid = ?
+            """,
+            (user["user_uuid"],),
+        ).fetchone()
+
+    if not row or not row["page_url"] or not row["token_encrypted"]:
+        raise HTTPException(status_code=400, detail="저장된 Confluence 연동 정보가 없습니다.")
+
+    now = datetime.now(KST).isoformat(timespec="seconds")
+    try:
+        test_result = test_confluence_page_with_token(row["page_url"], decrypt_confluence_token(row["token_encrypted"]))
+    except HTTPException:
+        with get_db_connection() as conn:
+            conn.execute(
+                """
+                UPDATE confluence_settings
+                SET updated_at = ?, last_tested_at = ?, last_test_status = 'failed'
+                WHERE user_uuid = ?
+                """,
+                (now, now, user["user_uuid"]),
+            )
+            conn.commit()
+        raise
+
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            UPDATE confluence_settings
+            SET enabled = 1, updated_at = ?, last_tested_at = ?, last_test_status = 'success'
+            WHERE user_uuid = ?
+            """,
+            (now, now, user["user_uuid"]),
+        )
+        conn.commit()
+
+    return {
+        "ok": True,
+        "setting_uuid": row["setting_uuid"],
+        "page_url": row["page_url"],
+        "page_id": test_result["page_id"],
+        "page_title": test_result["page_title"],
+        "space_key": test_result["space_key"],
+        "last_tested_at": now,
+    }
+
+
+@app.delete("/api/confluence-settings")
+def disconnect_confluence_settings(authorization: str | None = Header(default=None)):
+    user = get_session_user(authorization)
+    with get_db_connection() as conn:
+        conn.execute("DELETE FROM confluence_settings WHERE user_uuid = ?", (user["user_uuid"],))
+        conn.commit()
+    return {"ok": True}
 
 
 @app.get("/api/members")
