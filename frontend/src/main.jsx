@@ -892,6 +892,9 @@ function MobileLoungePage({
   onOpenReport,
   onCloseReport,
   onPlayRecap,
+  onPublishConfluence,
+  isPublishingConfluence,
+  confluencePublishError,
 }) {
   const [detailTab, setDetailTab] = useState('report');
 
@@ -935,6 +938,27 @@ function MobileLoungePage({
             </div>
             <button className="mobile-icon-btn" type="button" onClick={onCloseReport}><X size={18} /></button>
           </div>
+          <section className="mobile-confluence-card">
+            <div>
+              <span>Confluence</span>
+              <b>{loungeDetail?.confluence?.published ? 'Confluence 발급 완료' : 'Confluence 발급'}</b>
+              {loungeDetail?.confluence?.published ? (
+                <small>이 회의록은 Confluence에 발급되었습니다.</small>
+              ) : loungeDetail?.confluence?.can_publish ? (
+                <small>현재 회의록을 Confluence에 발급합니다.</small>
+              ) : (
+                <small>Confluence 인증이 필요합니다.</small>
+              )}
+            </div>
+            {loungeDetail?.confluence?.published ? (
+              <span className="mobile-confluence-done"><CheckCircle2 size={15} />완료</span>
+            ) : (
+              <button className="mobile-line-action" type="button" onClick={onPublishConfluence} disabled={!loungeDetail?.confluence?.can_publish || isPublishingConfluence || isLoadingLoungeDetail}>
+                {isPublishingConfluence ? '발급 중' : '발급'}
+              </button>
+            )}
+          </section>
+          {confluencePublishError && <div className="mobile-error-box">{confluencePublishError}</div>}
           <div className="mobile-detail-tabs" role="tablist" aria-label="회의록 상세 보기">
             <button className={detailTab === 'report' ? 'active' : ''} type="button" role="tab" aria-selected={detailTab === 'report'} onClick={() => setDetailTab('report')}>회의록</button>
             <button className={detailTab === 'recap' ? 'active' : ''} type="button" role="tab" aria-selected={detailTab === 'recap'} onClick={() => setDetailTab('recap')}>녹음 복기</button>
@@ -1097,6 +1121,9 @@ function App() {
   const [isLoadingLoungeDetail, setIsLoadingLoungeDetail] = useState(false);
   const [isLoadingLoungeAudio, setIsLoadingLoungeAudio] = useState(false);
   const [loungeAudioUrl, setLoungeAudioUrl] = useState('');
+  const [isPublishingConfluence, setIsPublishingConfluence] = useState(false);
+  const [confluencePublishError, setConfluencePublishError] = useState('');
+  const [confluencePublishSuccess, setConfluencePublishSuccess] = useState(null);
   const [meetingInfoOpen, setMeetingInfoOpen] = useState(false);
   const [processGuideOpen, setProcessGuideOpen] = useState(false);
   const [userGuideOpen, setUserGuideOpen] = useState(false);
@@ -1743,6 +1770,7 @@ function App() {
     setIsLoadingLoungeAudio(false);
     setLoungeError('');
     setLoungeAudioUrl('');
+    setConfluencePublishError('');
 
     try {
       const response = await fetch(API_BASE + '/api/reports/' + report.job_id, { headers: authHeaders() });
@@ -1772,6 +1800,45 @@ function App() {
     setIsLoadingLoungeAudio(false);
     setMeetingInfoOpen(false);
     setLoungeAudioUrl('');
+  }
+
+  async function reloadSelectedLoungeReport() {
+    const report = selectedLoungeReport || loungeDetail;
+    if (!report?.job_id) return;
+    const response = await fetch(API_BASE + '/api/reports/' + report.job_id, { headers: authHeaders() });
+    if (response.status === 401) {
+      handleExpiredSession();
+      return;
+    }
+    if (!response.ok) throw await apiError(response, '회의록 상세를 다시 불러오지 못했습니다.');
+    const detail = await response.json();
+    setLoungeDetail(detail);
+  }
+
+  async function publishLoungeReportToConfluence() {
+    const jobId = selectedLoungeReport?.job_id || loungeDetail?.job_id;
+    if (!jobId || isPublishingConfluence) return;
+    setConfluencePublishError('');
+    setIsPublishingConfluence(true);
+    try {
+      const response = await fetch(API_BASE + '/api/reports/' + jobId + '/confluence/publish', {
+        method: 'POST',
+        headers: authHeaders(),
+      });
+      if (response.status === 401) {
+        handleExpiredSession();
+        return;
+      }
+      if (!response.ok) throw await apiError(response, 'Confluence 발행에 실패했습니다.');
+      const data = await response.json();
+      setConfluencePublishSuccess(data);
+      await reloadSelectedLoungeReport();
+      await loadLoungeReports();
+    } catch (err) {
+      setConfluencePublishError(err.message);
+    } finally {
+      setIsPublishingConfluence(false);
+    }
   }
 
   async function deleteLoungeReport(report) {
@@ -2854,6 +2921,9 @@ function App() {
           onOpenReport={openLoungeReport}
           onCloseReport={closeLoungeReport}
           onPlayRecap={playLoungeRecapItem}
+          onPublishConfluence={publishLoungeReportToConfluence}
+          isPublishingConfluence={isPublishingConfluence}
+          confluencePublishError={confluencePublishError}
         />
       );
     }
@@ -2947,6 +3017,31 @@ function App() {
             </button>
           </div>
         </form>
+      </div>
+    )}
+
+    {confluencePublishSuccess && (
+      <div className="mobile-sheet-backdrop" onClick={() => setConfluencePublishSuccess(null)}>
+        <section className="mobile-install-sheet" onClick={(event) => event.stopPropagation()}>
+          <div className="mobile-detail-grip" />
+          <div className="mobile-team-sheet-head">
+            <div>
+              <span>Confluence</span>
+              <h2>Confluence 발급 완료</h2>
+            </div>
+            <button className="mobile-icon-btn" type="button" onClick={() => setConfluencePublishSuccess(null)}><X size={18} /></button>
+          </div>
+          <div className="mobile-confluence-success">
+            <CheckCircle2 size={24} />
+            <div>
+              <b>{confluencePublishSuccess.confluence_page_title || 'Confluence 페이지'}</b>
+              <small>이 회의록은 Confluence에 발급되었습니다.</small>
+            </div>
+          </div>
+          <div className="mobile-sheet-actions single">
+            <button className="mobile-primary-action dark" type="button" onClick={() => setConfluencePublishSuccess(null)}>확인</button>
+          </div>
+        </section>
       </div>
     )}
 
@@ -3972,9 +4067,27 @@ function App() {
               <Info size={16} />
               회의 정보 열람
             </button>
+            {loungeDetail?.confluence?.published ? (
+              <a className="confluence-published-chip" href={loungeDetail.confluence.published.confluence_page_url} target="_blank" rel="noreferrer">
+                <CheckCircle2 size={15} />
+                Confluence 발급 완료
+              </a>
+            ) : (
+              <button
+                className="line-btn"
+                type="button"
+                onClick={publishLoungeReportToConfluence}
+                disabled={!loungeDetail?.confluence?.can_publish || isPublishingConfluence || isLoadingLoungeDetail}
+                title={!loungeDetail?.confluence?.can_publish ? 'Confluence 인증이 필요합니다.' : 'Confluence에 회의록을 발급합니다.'}
+              >
+                {isPublishingConfluence ? <span className="btn-spinner blue" aria-hidden="true"></span> : <UploadCloud size={16} />}
+                {isPublishingConfluence ? '발급 중' : 'Confluence 발급'}
+              </button>
+            )}
             <button className="icon-btn" onClick={closeLoungeReport}><X size={18} /></button>
           </div>
         </div>
+        {confluencePublishError && <div className="confluence-publish-error">{confluencePublishError}</div>}
         <div className="lounge-detail-body">
           <section className="lounge-markdown-panel">
             {isLoadingLoungeDetail && <div className="lounge-state">회의록을 불러오는 중입니다.</div>}
@@ -4181,6 +4294,32 @@ function App() {
             </div>
             <div className="draft-modal-actions single">
               <button className="primary-btn" type="button" onClick={closeConfluenceSuccessModal}>닫기</button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {confluencePublishSuccess && (
+        <div className="draft-modal-backdrop open" onClick={() => setConfluencePublishSuccess(null)}>
+          <section className="draft-modal confluence-success-modal" role="dialog" aria-modal="true" aria-label="Confluence 발급 성공" onClick={(event) => event.stopPropagation()}>
+            <div className="draft-modal-head">
+              <div>
+                <span>Confluence Publish</span>
+                <h3>Confluence 발급 완료</h3>
+                <p>회의록이 Confluence에 정상 발급되었습니다.</p>
+              </div>
+              <button className="icon-btn" type="button" onClick={() => setConfluencePublishSuccess(null)} aria-label="Confluence 발급 성공 닫기"><X size={18} /></button>
+            </div>
+            <div className="confluence-success-body">
+              <CheckCircle2 size={26} />
+              <div>
+                <b>{confluencePublishSuccess.confluence_page_title || 'Confluence 페이지'}</b>
+                <small>발급된 Confluence 페이지로 바로 이동할 수 있습니다.</small>
+              </div>
+            </div>
+            <div className="draft-modal-actions">
+              <button className="line-btn" type="button" onClick={() => setConfluencePublishSuccess(null)}>닫기</button>
+              <a className="primary-btn confluence-open-link" href={confluencePublishSuccess.confluence_page_url} target="_blank" rel="noreferrer">Confluence 바로가기</a>
             </div>
           </section>
         </div>

@@ -25,6 +25,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from .processor import apply_speaker_mapping, release_gpu_memory, run_llm_postprocess, transcribe_meeting
 from .read import SUPPORTED_EXTENSIONS, read_text
 from .write import build_prompt, format_transcript, generate_report
+from .confluence import ConfluencePublishError, create_page as create_confluence_page
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 JOB_ROOT = BASE_DIR / "jobs"
@@ -356,6 +357,26 @@ def create_meeting_reports_table(conn, table_name: str = "meeting_reports"):
     )
 
 
+def create_confluence_published_reports_table(conn, table_name: str = "confluence_published_reports"):
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
+            publish_uuid TEXT PRIMARY KEY,
+            report_uuid TEXT NOT NULL UNIQUE,
+            job_id TEXT NOT NULL,
+            user_uuid TEXT NOT NULL,
+            confluence_page_id TEXT NOT NULL,
+            confluence_page_url TEXT NOT NULL,
+            confluence_page_title TEXT NOT NULL,
+            parent_page_url TEXT NOT NULL,
+            published_at TEXT NOT NULL,
+            FOREIGN KEY(report_uuid) REFERENCES meeting_reports(report_uuid) ON DELETE CASCADE,
+            FOREIGN KEY(user_uuid) REFERENCES users(user_uuid)
+        )
+        """
+    )
+
+
 def create_confluence_settings_table(conn, table_name: str = "confluence_settings"):
     conn.execute(
         f"""
@@ -544,6 +565,7 @@ def init_app_db():
         migrate_users_category_table(conn)
         migrate_meeting_reports_table(conn)
         migrate_recording_drafts_table(conn)
+        create_confluence_published_reports_table(conn)
         migrate_confluence_settings_table(conn)
         migrate_confluence_tokens_encrypted(conn)
         conn.execute("PRAGMA foreign_keys = ON")
@@ -1889,6 +1911,23 @@ def get_meeting_report_detail(job_id: str, authorization: str | None = Header(de
             """,
             (job_id, user["user_uuid"]),
         ).fetchone()
+        confluence_setting = conn.execute(
+            """
+            SELECT setting_uuid, page_url, token_encrypted, last_test_status
+            FROM confluence_settings
+            WHERE user_uuid = ?
+            """,
+            (user["user_uuid"],),
+        ).fetchone()
+        confluence_publish = conn.execute(
+            """
+            SELECT publish_uuid, confluence_page_id, confluence_page_url, confluence_page_title,
+                   parent_page_url, published_at
+            FROM confluence_published_reports
+            WHERE job_id = ? AND user_uuid = ?
+            """,
+            (job_id, user["user_uuid"]),
+        ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Report not found.")
 
@@ -1921,7 +1960,123 @@ def get_meeting_report_detail(job_id: str, authorization: str | None = Header(de
         for file in reference_files
     ]
     detail["has_references"] = bool(reference_files)
+    detail["confluence"] = {
+        "can_publish": bool(
+            confluence_setting
+            and confluence_setting["page_url"]
+            and confluence_setting["token_encrypted"]
+            and confluence_setting["last_test_status"] == "success"
+        ),
+        "requires_auth": not bool(
+            confluence_setting
+            and confluence_setting["page_url"]
+            and confluence_setting["token_encrypted"]
+            and confluence_setting["last_test_status"] == "success"
+        ),
+        "published": dict(confluence_publish) if confluence_publish else None,
+    }
     return detail
+
+
+@app.post("/api/reports/{job_id}/confluence/publish")
+def publish_meeting_report_to_confluence(job_id: str, authorization: str | None = Header(default=None)):
+    user = get_session_user(authorization)
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT report_uuid, job_id, user_uuid, title, purpose, meeting_date, start_time, end_time,
+                   organizations_json, participants_json, category_uuid, category_name
+            FROM meeting_reports
+            WHERE job_id = ? AND user_uuid = ?
+            """,
+            (job_id, user["user_uuid"]),
+        ).fetchone()
+        setting = conn.execute(
+            """
+            SELECT page_url, token_encrypted, last_test_status
+            FROM confluence_settings
+            WHERE user_uuid = ?
+            """,
+            (user["user_uuid"],),
+        ).fetchone()
+        published = conn.execute(
+            """
+            SELECT publish_uuid, confluence_page_url, confluence_page_title, published_at
+            FROM confluence_published_reports
+            WHERE job_id = ? AND user_uuid = ?
+            """,
+            (job_id, user["user_uuid"]),
+        ).fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    if published:
+        raise HTTPException(status_code=409, detail="이미 Confluence에 발행된 회의록입니다.")
+    if not setting or not setting["page_url"] or not setting["token_encrypted"]:
+        raise HTTPException(status_code=400, detail="Confluence 인증 정보가 필요합니다.")
+    if setting["last_test_status"] != "success":
+        raise HTTPException(status_code=400, detail="Confluence 연결 테스트를 먼저 완료하세요.")
+
+    report_path = JOB_ROOT / job_id / "report" / "meeting_report.md"
+    metadata_path = JOB_ROOT / job_id / "meta" / "meeting_metadata.json"
+    if not report_path.exists():
+        raise HTTPException(status_code=404, detail="회의록 마크다운 파일을 찾지 못했습니다.")
+
+    report_markdown = report_path.read_text(encoding="utf-8")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+    metadata.setdefault("title", row["title"] or "")
+    metadata.setdefault("purpose", row["purpose"] or "")
+    metadata.setdefault("date", row["meeting_date"] or "")
+    metadata.setdefault("start_time", row["start_time"] or "")
+    metadata.setdefault("end_time", row["end_time"] or "")
+    metadata.setdefault("category_name", row["category_name"] or "")
+    metadata.setdefault("organizations", json.loads(row["organizations_json"] or "[]"))
+    metadata.setdefault("participants", json.loads(row["participants_json"] or "[]"))
+
+    try:
+        publish_result = create_confluence_page(
+            setting["page_url"],
+            decrypt_confluence_token(setting["token_encrypted"]),
+            metadata,
+            report_markdown,
+        )
+    except ConfluencePublishError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+    now = datetime.now(KST).isoformat(timespec="seconds")
+    publish_uuid = uuid.uuid4().hex
+    with get_db_connection() as conn:
+        try:
+            conn.execute(
+                """
+                INSERT INTO confluence_published_reports (
+                    publish_uuid, report_uuid, job_id, user_uuid, confluence_page_id,
+                    confluence_page_url, confluence_page_title, parent_page_url, published_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    publish_uuid,
+                    row["report_uuid"],
+                    row["job_id"],
+                    user["user_uuid"],
+                    publish_result["confluence_page_id"],
+                    publish_result["confluence_page_url"],
+                    publish_result["confluence_page_title"],
+                    publish_result["parent_page_url"],
+                    now,
+                ),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="이미 Confluence에 발행된 회의록입니다.") from exc
+
+    return {
+        "publish_uuid": publish_uuid,
+        "report_uuid": row["report_uuid"],
+        "job_id": row["job_id"],
+        "published_at": now,
+        **publish_result,
+    }
 
 
 @app.get("/api/reports/{job_id}/references.zip")
