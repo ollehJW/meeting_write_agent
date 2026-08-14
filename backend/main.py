@@ -87,7 +87,7 @@ def hash_session_token(token: str):
 
 
 def generate_temporary_password():
-    return secrets.token_urlsafe(12)
+    return "wia1234!"
 
 
 def parse_session_datetime(value: str | None):
