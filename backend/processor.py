@@ -72,6 +72,16 @@ def release_gpu_memory(reason=""):
     )
 
 
+def move_to_cpu_for_cleanup(target, label):
+    if target is None:
+        return
+    try:
+        target.to(torch.device("cpu"))
+        log.info("Moved %s to CPU before CUDA cleanup", label)
+    except Exception as exc:  # noqa: BLE001 - cleanup must not fail the job.
+        log.warning("Failed to move %s to CPU during cleanup: %s", label, exc)
+
+
 def elapsed(start):
     return f"{time.time() - start:.1f}s"
 
@@ -717,6 +727,15 @@ def transcribe_meeting(audio_path: Path, output_dir: Path, progress: ProgressCal
         audio_input = None
         mono_waveform = None
         waveform = None
+        move_to_cpu_for_cleanup(
+            getattr(stt_model, "model", None),
+            "Qwen3-ASR model",
+        )
+        move_to_cpu_for_cleanup(
+            getattr(getattr(stt_model, "forced_aligner", None), "model", None),
+            "Qwen3-ASR forced aligner",
+        )
+        move_to_cpu_for_cleanup(diarization_pipeline, "pyannote pipeline")
         stt_model = None
         diarization_pipeline = None
         release_gpu_memory("meeting transcription")
