@@ -139,6 +139,23 @@ function MarkdownReport({ markdown }) {
   );
 }
 
+function UploadFailureDialog({ message, onClose }) {
+  if (!message) return null;
+  return (
+    <div className="draft-modal-backdrop open" role="presentation" onClick={onClose}>
+      <section className="upload-failure-dialog" role="alertdialog" aria-modal="true" aria-labelledby="upload-failure-title" onClick={(event) => event.stopPropagation()}>
+        <div className="upload-failure-icon"><AlertTriangle size={22} /></div>
+        <div className="upload-failure-copy">
+          <span>Analysis Failed</span>
+          <h3 id="upload-failure-title">회의록 분석을 시작하지 못했습니다.</h3>
+          <p>{message}</p>
+        </div>
+        <button className="primary-btn" type="button" onClick={onClose}>확인</button>
+      </section>
+    </div>
+  );
+}
+
 function AuthenticatedAudio({ path, token, className = '', onSessionExpired }) {
   const [sourceUrl, setSourceUrl] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -1143,6 +1160,7 @@ function App() {
   const [currentView, setCurrentView] = useState('home');
   const [mobilePath, setMobilePath] = useState(() => window.location.pathname);
   const [error, setError] = useState('');
+  const [uploadFailure, setUploadFailure] = useState('');
   const [isSavingMap, setIsSavingMap] = useState(false);
   const [reportInstruction, setReportInstruction] = useState('');
   const [reportMarkdown, setReportMarkdown] = useState('');
@@ -2603,6 +2621,7 @@ function App() {
     const uploadAudioFile = activeMeetingAudioFile;
     if (!uploadAudioFile) return;
     setError('');
+    setUploadFailure('');
     setResult(null);
     setMappedSentences([]);
     setSpeakerMatches({ matches: [] });
@@ -2637,20 +2656,27 @@ function App() {
     formData.append('meeting_category_uuid', selectedCategory?.category_uuid || '');
     formData.append('meeting_category_name', selectedCategory?.category_name || '');
     formData.append('meeting_reference_text', '');
-    const response = await fetch(`${API_BASE}/api/jobs`, {
-      method: 'POST',
-      headers: authHeaders(),
-      body: formData,
-    });
-    if (!response.ok) {
-      const text = await response.text();
+    try {
+      const response = await fetch(`${API_BASE}/api/jobs`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: formData,
+      });
+      if (response.status === 401) {
+        setJob(null);
+        handleExpiredSession();
+        return;
+      }
+      if (!response.ok) throw await apiError(response, '업로드에 실패했습니다.');
+      const data = await response.json();
+      setJob(data);
+      startPolling(data.job_id);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '업로드에 실패했습니다.';
       setJob(null);
-      setError(text || '업로드에 실패했습니다.');
-      return;
+      setError(message);
+      setUploadFailure(message);
     }
-    const data = await response.json();
-    setJob(data);
-    startPolling(data.job_id);
   }
 
   function updateSpeakerName(speakerId, value) {
@@ -3169,6 +3195,7 @@ function App() {
       </div>
     )}
 
+        <UploadFailureDialog message={uploadFailure} onClose={() => setUploadFailure('')} />
         {passwordSetupModal}
       </>
     );
@@ -3668,12 +3695,12 @@ function App() {
                       <label className="upload-box">
                         <input
                           type="file"
-                          accept="audio/*,.webm,.m4a,.wav,.mp3,.aac,.flac,.ogg"
+                          accept=".webm,.m4a,.wav,.mp3,.mp4,audio/webm,audio/mp4,audio/mpeg,audio/wav"
                           onChange={(event) => setPcCreateAudioFile(event.target.files?.[0] || null)}
                         />
                         <UploadCloud className="upload-icon" size={34} />
                         <b>{pcCreateAudioFile ? pcCreateAudioFile.name : '녹음 파일을 선택하거나 끌어오세요'}</b>
-                        <span>webm, m4a, wav, mp3, aac, flac, ogg 파일을 업로드할 수 있습니다.</span>
+                        <span>webm, m4a, wav, mp3 파일을 업로드할 수 있습니다.</span>
                       </label>
                     </div>
 
@@ -4663,6 +4690,7 @@ function App() {
       </div>
     )}
 
+    <UploadFailureDialog message={uploadFailure} onClose={() => setUploadFailure('')} />
     {passwordSetupModal}
     </>
   );

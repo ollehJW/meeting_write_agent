@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import logging
 import os
 import secrets
 import shutil
@@ -38,6 +39,8 @@ from .upload_validation import (
 )
 from .write import build_prompt, format_transcript, generate_report
 from .confluence import ConfluencePublishError, create_page as create_confluence_page
+
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 JOB_ROOT = BASE_DIR / "jobs"
@@ -2288,6 +2291,14 @@ def create_job(
                 429,
             )
     except UploadPolicyError as exc:
+        logger.warning(
+            "job upload rejected user_uuid=%s job_id=%s audio_extension=%s code=%s message=%s",
+            current_user["user_uuid"],
+            job_id,
+            Path(audio.filename or "").suffix.lower() or "none",
+            exc.code,
+            exc.message,
+        )
         with jobs_lock:
             jobs.pop(job_id, None)
             active_job_ids.discard(job_id)
