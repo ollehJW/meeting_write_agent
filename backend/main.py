@@ -19,12 +19,23 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from fastapi import Cookie, FastAPI, File, Form, Header, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from cryptography.fernet import Fernet, InvalidToken
 
 from .processor import apply_speaker_mapping, run_llm_postprocess, transcribe_meeting
-from .read import SUPPORTED_EXTENSIONS, read_text
+from .config import settings
+from .read import read_text
+from .upload_validation import (
+    MB,
+    RequestBudget,
+    UploadPolicyError,
+    copy_upload_limited,
+    inspect_audio,
+    validate_audio_extension,
+    validate_reference_extension,
+    validate_reference_file,
+)
 from .write import build_prompt, format_transcript, generate_report
 from .confluence import ConfluencePublishError, create_page as create_confluence_page
 
@@ -45,18 +56,12 @@ MEDIA_SESSION_TTL_HOURS = 2
 MEDIA_SESSION_COOKIE = "wiameet_media_session"
 CONFLUENCE_TOKEN_PREFIX = "fernet:"
 
-def env_int(name: str, default: int, minimum: int = 0):
-    try:
-        value = int(os.getenv(name, str(default)))
-    except ValueError:
-        value = default
-    return max(minimum, value)
-
-
-GPU_WORKERS = env_int("GPU_WORKERS", 1, 1)
-LLM_WORKERS = env_int("LLM_WORKERS", 3, 1)
-MAX_ACTIVE_JOBS = env_int("MAX_ACTIVE_JOBS", 6, 1)
-MAX_QUEUED_JOBS = env_int("MAX_QUEUED_JOBS", 10)
+GPU_WORKERS = settings.jobs.gpu_workers
+LLM_WORKERS = settings.jobs.llm_workers
+MAX_ACTIVE_JOBS = settings.jobs.max_active
+MAX_QUEUED_JOBS = settings.jobs.max_queued
+MAX_ACTIVE_JOBS_PER_USER = settings.jobs.max_active_per_user
+MAX_UNFINISHED_JOBS_PER_USER = settings.jobs.max_unfinished_per_user
 
 cleanup_stop_event = Event()
 cleanup_thread: Thread | None = None
@@ -899,6 +904,33 @@ def work_cleanup_loop():
 app = FastAPI(title="WIAMeet API")
 
 
+@app.middleware("http")
+async def reject_oversized_upload_requests(request, call_next):
+    if request.method == "POST" and request.url.path in {"/api/jobs", "/api/recording-drafts"}:
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                request_bytes = int(content_length)
+            except ValueError:
+                return JSONResponse(
+                    status_code=400,
+                    content={"detail": "올바르지 않은 Content-Length 헤더입니다."},
+                )
+            maximum_bytes = settings.upload.request_max_mb * MB
+            if request_bytes > maximum_bytes:
+                return JSONResponse(
+                    status_code=413,
+                    content={
+                        "detail": (
+                            f"전체 업로드 크기는 {settings.upload.request_max_mb}MB를 "
+                            "초과할 수 없습니다."
+                        )
+                    },
+                    headers={"X-WIAMeet-Error-Code": "REQUEST_TOO_LARGE"},
+                )
+    return await call_next(request)
+
+
 @app.on_event("startup")
 def start_work_cleanup_scheduler():
     global cleanup_thread
@@ -1172,17 +1204,39 @@ def submit_pipeline_stage(job_id: str):
         gpu_executor.submit(run_gpu_job, job_id)
 
 
+def active_pipeline_count_for_user(user_uuid: str):
+    return sum(
+        1
+        for active_id in active_job_ids
+        if jobs.get(active_id, {}).get("created_by_user_uuid") == user_uuid
+    )
+
+
+def can_activate_pipeline_job(job_id: str):
+    job = jobs.get(job_id)
+    if not job or len(active_job_ids) >= MAX_ACTIVE_JOBS:
+        return False
+    return (
+        active_pipeline_count_for_user(job.get("created_by_user_uuid", ""))
+        < MAX_ACTIVE_JOBS_PER_USER
+    )
+
+
 def admit_pipeline_job(job_id: str):
     submit_now = False
     with jobs_lock:
-        if len(active_job_ids) < MAX_ACTIVE_JOBS:
+        if can_activate_pipeline_job(job_id):
             active_job_ids.add(job_id)
             submit_now = True
         elif len(pending_job_ids) < MAX_QUEUED_JOBS:
             pending_job_ids.append(job_id)
             job = jobs[job_id]
-            job.update(status="queued", stage="capacity_queued", progress=0,
-                       message="서버 작업 슬롯 대기 중입니다.")
+            job.update(
+                status="queued",
+                stage="capacity_queued",
+                progress=0,
+                message="서버 작업 슬롯 대기 중입니다.",
+            )
             append_job_log(job, job["stage"], job["progress"], job["message"])
         else:
             return False
@@ -1196,12 +1250,16 @@ def finish_pipeline_job(job_id: str):
     next_job_id = None
     with jobs_lock:
         active_job_ids.discard(job_id)
-        while pending_job_ids:
+        pending_count = len(pending_job_ids)
+        for _ in range(pending_count):
             candidate = pending_job_ids.popleft()
-            if candidate in jobs:
+            if candidate not in jobs:
+                continue
+            if can_activate_pipeline_job(candidate):
                 active_job_ids.add(candidate)
                 next_job_id = candidate
                 break
+            pending_job_ids.append(candidate)
     if next_job_id:
         submit_pipeline_stage(next_job_id)
 
@@ -1903,14 +1961,63 @@ def list_recording_drafts(authorization: str | None = Header(default=None)):
     }
 
 
+def enforce_request_size(content_length: int | None):
+    maximum_bytes = settings.upload.request_max_mb * MB
+    if content_length is not None and content_length > maximum_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"전체 업로드 크기는 {settings.upload.request_max_mb}MB를 초과할 수 없습니다.",
+            headers={"X-WIAMeet-Error-Code": "REQUEST_TOO_LARGE"},
+        )
+
+
+def upload_policy_http_error(exc: UploadPolicyError):
+    return HTTPException(
+        status_code=exc.status_code,
+        detail=exc.message,
+        headers={"X-WIAMeet-Error-Code": exc.code},
+    )
+
+
+def reserve_user_job(job_id: str, user: dict):
+    with jobs_lock:
+        unfinished_count = sum(
+            1
+            for job in jobs.values()
+            if job.get("created_by_user_uuid") == user["user_uuid"]
+            and job.get("status") in {"queued", "running"}
+        )
+        if unfinished_count >= MAX_UNFINISHED_JOBS_PER_USER:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"사용자당 미완료 작업은 최대 "
+                    f"{MAX_UNFINISHED_JOBS_PER_USER}건까지 허용됩니다."
+                ),
+                headers={"X-WIAMeet-Error-Code": "USER_JOB_LIMIT_EXCEEDED"},
+            )
+        jobs[job_id] = {
+            "job_id": job_id,
+            "status": "queued",
+            "stage": "upload_validation",
+            "progress": 0,
+            "message": "업로드 파일을 검사하고 있습니다.",
+            "logs": [],
+            "created_by_user_uuid": user["user_uuid"],
+            "created_by_username": user.get("username", ""),
+        }
+
+
 @app.post("/api/recording-drafts")
 def create_recording_draft(
     audio: UploadFile = File(...),
     title: str = Form(""),
     duration_seconds: int = Form(0),
     authorization: str | None = Header(default=None),
+    content_length: int | None = Header(default=None, alias="Content-Length"),
 ):
     user = get_session_user(authorization)
+    enforce_request_size(content_length)
     clean_title = title.strip()
     if not clean_title:
         clean_title = "임시 녹음 " + datetime.now(KST).strftime("%Y-%m-%d %H:%M")
@@ -1919,36 +2026,57 @@ def create_recording_draft(
 
     draft_uuid = uuid.uuid4().hex
     draft_dir = BACKEND_WORKSPACE_ROOT / draft_uuid
-    draft_dir.mkdir(parents=True, exist_ok=True)
-    suffix = Path(Path(audio.filename).name).suffix.lower() or ".webm"
-    storage_path = draft_dir / f"draft{suffix}"
-    with storage_path.open("wb") as f:
-        shutil.copyfileobj(audio.file, f)
-
-    with get_db_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO recording_drafts (
-                draft_uuid, user_id, title, storage_path, duration_seconds, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                draft_uuid,
-                user["user_uuid"],
-                clean_title,
-                str(storage_path),
-                max(0, int(duration_seconds or 0)),
-                datetime.now(KST).isoformat(),
-            ),
+    storage_path = None
+    try:
+        extension = validate_audio_extension(Path(audio.filename).name)
+        draft_dir.mkdir(parents=True, exist_ok=True)
+        storage_path = draft_dir / f"draft{extension}"
+        budget = RequestBudget(settings.upload.request_max_mb * MB)
+        copy_upload_limited(
+            audio,
+            storage_path,
+            settings.upload.audio.max_size_mb * MB,
+            budget,
+            "AUDIO_TOO_LARGE",
+            f"오디오 파일은 최대 {settings.upload.audio.max_size_mb}MB까지 업로드할 수 있습니다.",
         )
-        conn.commit()
+        actual_duration = inspect_audio(storage_path, extension)
+    except UploadPolicyError as exc:
+        shutil.rmtree(draft_dir, ignore_errors=True)
+        raise upload_policy_http_error(exc) from exc
+    except Exception:
+        shutil.rmtree(draft_dir, ignore_errors=True)
+        raise
+
+    now = datetime.now(KST).isoformat()
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO recording_drafts (
+                    draft_uuid, user_id, title, storage_path, duration_seconds, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    draft_uuid,
+                    user["user_uuid"],
+                    clean_title,
+                    str(storage_path),
+                    max(0, round(actual_duration)),
+                    now,
+                ),
+            )
+            conn.commit()
+    except Exception:
+        shutil.rmtree(draft_dir, ignore_errors=True)
+        raise
 
     return {
         "draft": {
             "draft_uuid": draft_uuid,
             "title": clean_title,
-            "duration_seconds": max(0, int(duration_seconds or 0)),
-            "created_at": datetime.now(KST).isoformat(),
+            "duration_seconds": max(0, round(actual_duration)),
+            "created_at": now,
         }
     }
 
@@ -1983,6 +2111,7 @@ def create_job(
     audio: UploadFile = File(...),
     references: list[UploadFile] | None = File(default=None),
     authorization: str | None = Header(default=None),
+    content_length: int | None = Header(default=None, alias="Content-Length"),
     meeting_title: str = Form(""),
     meeting_date: str = Form(""),
     meeting_start_time: str = Form(""),
@@ -1994,6 +2123,7 @@ def create_job(
     meeting_category_name: str = Form(""),
     meeting_reference_text: str = Form(""),
 ):
+    enforce_request_size(content_length)
     if not audio.filename:
         raise HTTPException(status_code=400, detail="No audio file uploaded.")
     if not meeting_title.strip():
@@ -2008,124 +2138,178 @@ def create_job(
         raise HTTPException(status_code=400, detail="Meeting start time is required.")
     if not meeting_end_time.strip():
         raise HTTPException(status_code=400, detail="Meeting end time is required.")
-    if not parse_participants(meeting_organizations):
+
+    organizations = parse_participants(meeting_organizations)
+    participant_list = parse_participants(participants)
+    if not organizations:
         raise HTTPException(status_code=400, detail="At least one meeting organization is required.")
-    if not parse_participants(participants):
+    if not participant_list:
         raise HTTPException(status_code=400, detail="At least one participant is required.")
 
-    current_user = get_session_user(authorization)
+    reference_uploads = [item for item in (references or []) if item.filename]
+    if len(reference_uploads) > settings.upload.references.max_files:
+        raise HTTPException(
+            status_code=400,
+            detail=f"참고자료는 최대 {settings.upload.references.max_files}개까지 첨부할 수 있습니다.",
+            headers={"X-WIAMeet-Error-Code": "TOO_MANY_REFERENCES"},
+        )
 
+    current_user = get_session_user(authorization)
     job_id = uuid.uuid4().hex
+    reserve_user_job(job_id, current_user)
+
     output_dir = WORK_ROOT / job_id
     persist_dir = JOB_ROOT / job_id
     audio_dir = output_dir / "audio"
     meta_dir = output_dir / "meta"
     report_dir = output_dir / "report"
     references_dir = output_dir / "references"
-    for directory in (audio_dir, meta_dir, report_dir, references_dir):
-        directory.mkdir(parents=True, exist_ok=True)
 
-    suffix = Path(audio.filename).suffix or ".audio"
-    audio_path = audio_dir / f"audio{suffix}"
+    try:
+        audio_extension = validate_audio_extension(Path(audio.filename).name)
+        for directory in (audio_dir, meta_dir, report_dir, references_dir):
+            directory.mkdir(parents=True, exist_ok=True)
 
-    with audio_path.open("wb") as f:
-        shutil.copyfileobj(audio.file, f)
+        budget = RequestBudget(settings.upload.request_max_mb * MB)
+        audio_path = audio_dir / f"audio{audio_extension}"
+        copy_upload_limited(
+            audio,
+            audio_path,
+            settings.upload.audio.max_size_mb * MB,
+            budget,
+            "AUDIO_TOO_LARGE",
+            f"오디오 파일은 최대 {settings.upload.audio.max_size_mb}MB까지 업로드할 수 있습니다.",
+        )
+        audio_duration_seconds = inspect_audio(audio_path, audio_extension)
 
-    reference_text_parts = []
-    for reference in references or []:
-        if not reference.filename:
-            continue
-        reference_name = Path(reference.filename).name
-        reference_suffix = Path(reference_name).suffix.lower()
-        if reference_suffix not in SUPPORTED_EXTENSIONS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported reference file type: {reference_name}",
+        reference_text_parts = []
+        reference_total_bytes = 0
+        seen_reference_names = set()
+        for reference in reference_uploads:
+            reference_name = Path(reference.filename).name
+            if reference_name in seen_reference_names:
+                raise UploadPolicyError(
+                    "DUPLICATE_REFERENCE_NAME",
+                    f"같은 이름의 참고자료를 중복 첨부할 수 없습니다: {reference_name}",
+                )
+            seen_reference_names.add(reference_name)
+            reference_extension = validate_reference_extension(reference_name)
+            reference_path = references_dir / reference_name
+            reference_size = copy_upload_limited(
+                reference,
+                reference_path,
+                settings.upload.references.max_file_size_mb * MB,
+                budget,
+                "REFERENCE_TOO_LARGE",
+                f"참고자료 한 개는 최대 {settings.upload.references.max_file_size_mb}MB까지 첨부할 수 있습니다.",
             )
+            reference_total_bytes += reference_size
+            if reference_total_bytes > settings.upload.references.max_total_size_mb * MB:
+                raise UploadPolicyError(
+                    "REFERENCES_TOO_LARGE",
+                    f"참고자료 전체 크기는 {settings.upload.references.max_total_size_mb}MB를 초과할 수 없습니다.",
+                    413,
+                )
+            validate_reference_file(reference_path, reference_extension)
+            try:
+                extracted_text = read_text(reference_path)
+            except UploadPolicyError:
+                raise
+            except Exception as exc:
+                raise UploadPolicyError(
+                    "REFERENCE_EXTRACTION_FAILED",
+                    f"{reference_name} 참고자료에서 텍스트를 추출하지 못했습니다: {exc}",
+                ) from exc
+            if extracted_text.strip():
+                reference_text_parts.append(
+                    f"[Reference: {reference_name}]\n{extracted_text.strip()}"
+                )
 
-        reference_path = references_dir / reference_name
-        with reference_path.open("wb") as f:
-            shutil.copyfileobj(reference.file, f)
-
-        try:
-            extracted_text = read_text(reference_path)
-        except Exception as exc:  # noqa: BLE001 - extraction errors should surface to users.
-            raise HTTPException(
-                status_code=400,
-                detail=f"Failed to extract reference text from {reference_name}: {exc}",
-            ) from exc
-
-        if extracted_text.strip():
-            reference_text_parts.append(f"[Reference: {reference_name}]\n{extracted_text.strip()}")
-
-    extracted_reference_text = "\n\n".join(reference_text_parts).strip()
-    combined_reference_text = "\n\n".join(
-        item.strip()
-        for item in (meeting_reference_text, extracted_reference_text)
-        if item and item.strip()
-    )
-
-    meeting_metadata = {
-        "title": meeting_title.strip(),
-        "purpose": meeting_purpose.strip(),
-        "date": meeting_date.strip(),
-        "start_time": meeting_start_time.strip(),
-        "end_time": meeting_end_time.strip(),
-        "organizations": parse_participants(meeting_organizations),
-        "participants": parse_participants(participants),
-        "category_uuid": meeting_category_uuid.strip(),
-        "category_name": meeting_category_name.strip(),
-    }
-    (meta_dir / "meeting_metadata.json").write_text(
-        json.dumps(meeting_metadata, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-    with jobs_lock:
-        jobs[job_id] = {
-            "job_id": job_id,
-            "status": "queued",
-            "stage": "queued",
-            "progress": 0,
-            "message": "작업 대기 중입니다.",
-            "logs": [],
-            "audio_path": str(audio_path),
-            "output_dir": str(output_dir),
-            "persist_dir": str(persist_dir),
-            "meta_dir": str(meta_dir),
-            "report_dir": str(report_dir),
-            "references_dir": str(references_dir),
-            "result": None,
-            "speaker_mapping": {},
-            "speaker_matches": {"matches": []},
-            "stt_corrections": {"corrections": []},
-            "original_result": None,
-            "refined_result": None,
-            "participants": parse_participants(participants),
-            "meeting_metadata": meeting_metadata,
-            "created_by_user_uuid": current_user.get("user_uuid"),
-            "created_by_username": current_user.get("username"),
-            "meeting_purpose": meeting_purpose,
-            "meeting_reference_text": combined_reference_text,
-            "meeting_report": "",
-            "report_finalized": False,
-            "report_status": "idle",
-            "report_error": "",
-            "report_instruction": "",
-            "persisted": False,
-            "created_at": datetime.now(KST).isoformat(),
+        extracted_reference_text = "\n\n".join(reference_text_parts).strip()
+        combined_reference_text = "\n\n".join(
+            item.strip()
+            for item in (meeting_reference_text, extracted_reference_text)
+            if item and item.strip()
+        )
+        meeting_metadata = {
+            "title": meeting_title.strip(),
+            "purpose": meeting_purpose.strip(),
+            "date": meeting_date.strip(),
+            "start_time": meeting_start_time.strip(),
+            "end_time": meeting_end_time.strip(),
+            "organizations": organizations,
+            "participants": participant_list,
+            "category_uuid": meeting_category_uuid.strip(),
+            "category_name": meeting_category_name.strip(),
+            "audio_duration_seconds": round(audio_duration_seconds, 1),
         }
+        write_json_artifact(meta_dir / "meeting_metadata.json", meeting_metadata)
 
-    persist_job(job_id)
-    if not admit_pipeline_job(job_id):
+        with jobs_lock:
+            jobs[job_id] = {
+                "job_id": job_id,
+                "status": "queued",
+                "stage": "queued",
+                "progress": 0,
+                "message": "작업 대기 중입니다.",
+                "logs": [],
+                "audio_path": str(audio_path),
+                "output_dir": str(output_dir),
+                "persist_dir": str(persist_dir),
+                "meta_dir": str(meta_dir),
+                "report_dir": str(report_dir),
+                "references_dir": str(references_dir),
+                "result": None,
+                "speaker_mapping": {},
+                "speaker_matches": {"matches": []},
+                "stt_corrections": {"corrections": []},
+                "original_result": None,
+                "refined_result": None,
+                "participants": participant_list,
+                "meeting_metadata": meeting_metadata,
+                "created_by_user_uuid": current_user["user_uuid"],
+                "created_by_username": current_user.get("username", ""),
+                "meeting_purpose": meeting_purpose,
+                "meeting_reference_text": combined_reference_text,
+                "meeting_report": "",
+                "report_finalized": False,
+                "report_status": "idle",
+                "report_error": "",
+                "report_instruction": "",
+                "persisted": False,
+                "created_at": datetime.now(KST).isoformat(),
+            }
+
+        persist_job(job_id)
+        if not admit_pipeline_job(job_id):
+            raise UploadPolicyError(
+                "QUEUE_CAPACITY_EXCEEDED",
+                "현재 분석 대기열이 가득 찼습니다. 잠시 후 다시 시도하세요.",
+                429,
+            )
+    except UploadPolicyError as exc:
         with jobs_lock:
             jobs.pop(job_id, None)
+            active_job_ids.discard(job_id)
+            try:
+                pending_job_ids.remove(job_id)
+            except ValueError:
+                pass
         delete_processing_job(job_id)
         shutil.rmtree(output_dir, ignore_errors=True)
-        raise HTTPException(
-            status_code=429,
-            detail="현재 분석 대기열이 가득 찼습니다. 잠시 후 다시 시도하세요.",
-        )
+        raise upload_policy_http_error(exc) from exc
+    except Exception:
+        with jobs_lock:
+            jobs.pop(job_id, None)
+            active_job_ids.discard(job_id)
+            try:
+                pending_job_ids.remove(job_id)
+            except ValueError:
+                pass
+        delete_processing_job(job_id)
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise
+
     return get_job(job_id, authorization)
 
 

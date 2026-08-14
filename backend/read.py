@@ -8,8 +8,11 @@ import zipfile
 from pathlib import Path
 from xml.etree import ElementTree
 
+from .config import settings
+from .upload_validation import UploadPolicyError, validate_archive
 
-SUPPORTED_EXTENSIONS = {".pdf", ".pptx", ".ppt"}
+
+SUPPORTED_EXTENSIONS = set(settings.upload.references.allowed_extensions)
 
 
 def normalize_text(text: str) -> str:
@@ -28,15 +31,46 @@ def normalize_text(text: str) -> str:
 
 
 def read_pdf_text(path: Path) -> str:
-    if shutil.which("pdftotext") is None:
-        raise RuntimeError("pdftotext is required to extract PDF text.")
+    pdftotext = shutil.which("pdftotext")
+    pdfinfo = shutil.which("pdfinfo")
+    if pdftotext is None or pdfinfo is None:
+        raise RuntimeError("pdftotext and pdfinfo are required to extract PDF text.")
 
-    completed = subprocess.run(
-        ["pdftotext", "-layout", "-enc", "UTF-8", str(path), "-"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        info = subprocess.run(
+            [pdfinfo, str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=settings.documents.extraction_timeout_seconds,
+        )
+        page_match = re.search(r"^Pages:\s+(\d+)", info.stdout, flags=re.MULTILINE)
+        if not page_match:
+            raise RuntimeError("PDF page count could not be determined.")
+        page_count = int(page_match.group(1))
+        if page_count > settings.documents.pdf_max_pages:
+            raise UploadPolicyError(
+                "PDF_TOO_MANY_PAGES",
+                f"PDF는 최대 {settings.documents.pdf_max_pages}페이지까지 처리할 수 있습니다.",
+            )
+
+        completed = subprocess.run(
+            [pdftotext, "-layout", "-enc", "UTF-8", str(path), "-"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=settings.documents.extraction_timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise UploadPolicyError(
+            "DOCUMENT_TIMEOUT",
+            "PDF 처리 시간이 초과되었습니다.",
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise UploadPolicyError(
+            "CORRUPTED_REFERENCE",
+            "PDF 파일을 읽을 수 없습니다.",
+        ) from exc
     return normalize_text(completed.stdout)
 
 
@@ -46,6 +80,12 @@ def slide_sort_key(path: str) -> tuple[int, str]:
 
 
 def extract_text_from_xml(xml_bytes: bytes) -> list[str]:
+    upper_prefix = xml_bytes[:4096].upper()
+    if b"<!DOCTYPE" in upper_prefix or b"<!ENTITY" in upper_prefix:
+        raise UploadPolicyError(
+            "UNSAFE_ARCHIVE",
+            "외부 엔티티 또는 DTD가 포함된 XML 문서는 처리할 수 없습니다.",
+        )
     root = ElementTree.fromstring(xml_bytes)
     texts = []
     for element in root.iter():
@@ -57,6 +97,7 @@ def extract_text_from_xml(xml_bytes: bytes) -> list[str]:
 
 
 def read_pptx_text(path: Path) -> str:
+    validate_archive(path)
     chunks = []
     with zipfile.ZipFile(path) as archive:
         slide_names = sorted(
@@ -97,20 +138,32 @@ def read_ppt_text(path: Path) -> str:
 
     with tempfile.TemporaryDirectory(prefix="ppt_to_text_") as temp_dir:
         temp_path = Path(temp_dir)
-        subprocess.run(
-            [
-                soffice,
-                "--headless",
-                "--convert-to",
-                "pptx",
-                "--outdir",
-                str(temp_path),
-                str(path),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            subprocess.run(
+                [
+                    soffice,
+                    "--headless",
+                    "--convert-to",
+                    "pptx",
+                    "--outdir",
+                    str(temp_path),
+                    str(path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=settings.documents.libreoffice_timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise UploadPolicyError(
+                "DOCUMENT_TIMEOUT",
+                "PPT 변환 시간이 초과되었습니다.",
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            raise UploadPolicyError(
+                "CORRUPTED_REFERENCE",
+                "PPT 파일을 변환할 수 없습니다.",
+            ) from exc
         converted = temp_path / f"{path.stem}.pptx"
         if not converted.exists():
             matches = list(temp_path.glob("*.pptx"))

@@ -34,33 +34,19 @@ def load_env_file(path=ENV_PATH):
         os.environ.setdefault(key, value)
 
 
-def env_int(name, default, minimum=0):
-    try:
-        value = int(os.getenv(name, str(default)))
-    except ValueError:
-        value = default
-    return max(minimum, value)
-
-
-def env_float(name, default, minimum=0.0):
-    try:
-        value = float(os.getenv(name, str(default)))
-    except ValueError:
-        value = default
-    return max(minimum, value)
-
-
 load_env_file()
+
+from .config import settings
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "")
 OPENAI_API_VERSION = os.getenv("OPENAI_API_VERSION", "2025-04-01-preview")
-LLM_CONNECT_TIMEOUT_SECONDS = env_float("LLM_CONNECT_TIMEOUT_SECONDS", 10, 1)
-LLM_READ_TIMEOUT_SECONDS = env_float("LLM_READ_TIMEOUT_SECONDS", 180, 1)
-LLM_MAX_RETRIES = env_int("LLM_MAX_RETRIES", 4)
-LLM_RETRY_BASE_SECONDS = env_float("LLM_RETRY_BASE_SECONDS", 2, 0.1)
-LLM_MAX_RETRY_DELAY_SECONDS = env_float("LLM_MAX_RETRY_DELAY_SECONDS", 60, 1)
+LLM_CONNECT_TIMEOUT_SECONDS = settings.llm.connect_timeout_seconds
+LLM_READ_TIMEOUT_SECONDS = settings.llm.read_timeout_seconds
+LLM_MAX_RETRIES = settings.llm.max_retries
+LLM_RETRY_BASE_SECONDS = settings.llm.retry_base_seconds
+LLM_MAX_RETRY_DELAY_SECONDS = settings.llm.max_retry_delay_seconds
 
 _client = None
 _client_lock = threading.Lock()

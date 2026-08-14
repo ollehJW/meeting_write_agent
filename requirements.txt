@@ -3,6 +3,7 @@ fastapi==0.139.0
 uvicorn[standard]==0.50.2
 python-multipart==0.0.32
 pydantic==2.13.4
+PyYAML==6.0.3
 cryptography==50.0.0
 
 # OpenAI/Azure OpenAI LLM post-processing

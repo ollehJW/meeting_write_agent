@@ -1,0 +1,44 @@
+upload:
+  request_max_mb: 700
+  audio:
+    max_size_mb: 500
+    max_duration_minutes: 180
+    validation_timeout_seconds: 60
+    allowed_extensions:
+      - .webm
+      - .m4a
+      - .mp3
+      - .wav
+      - .mp4
+  references:
+    max_files: 10
+    max_file_size_mb: 50
+    max_total_size_mb: 200
+    allowed_extensions:
+      - .pdf
+      - .pptx
+      - .ppt
+
+documents:
+  extraction_timeout_seconds: 120
+  libreoffice_timeout_seconds: 60
+  pdf_max_pages: 300
+  archive:
+    max_files: 3000
+    max_uncompressed_mb: 500
+    max_compression_ratio: 100
+
+jobs:
+  gpu_workers: 1
+  llm_workers: 3
+  max_active: 6
+  max_queued: 10
+  max_active_per_user: 1
+  max_unfinished_per_user: 2
+
+llm:
+  connect_timeout_seconds: 10
+  read_timeout_seconds: 180
+  max_retries: 4
+  retry_base_seconds: 2
+  max_retry_delay_seconds: 60
