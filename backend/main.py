@@ -39,6 +39,7 @@ from .upload_validation import (
 )
 from .write import build_prompt, format_transcript, generate_report
 from .confluence import ConfluencePublishError, create_page as create_confluence_page
+from .audio_normalization import AudioNormalizationError, normalize_meeting_audio
 
 logger = logging.getLogger(__name__)
 
@@ -1268,13 +1269,44 @@ def finish_pipeline_job(job_id: str):
 
 
 def run_gpu_job(job_id: str):
-    set_job(job_id, status="running", stage="gpu_starting", progress=1,
-            message="GPU 분석을 시작합니다.")
+    set_job(job_id, status="running", stage="audio_normalizing", progress=1,
+            message="회의 녹음을 분석용 오디오로 변환하고 있습니다.")
     with jobs_lock:
         job = dict(jobs[job_id])
+    source_audio_path = Path(job.get("source_audio_path", job["audio_path"]))
+    audio_dir = source_audio_path.parent
+    analysis_audio_path = audio_dir / "analysis.wav"
+    archive_audio_path = audio_dir / "audio.m4a"
     try:
+        normalized_duration = normalize_meeting_audio(
+            source_audio_path,
+            analysis_audio_path,
+            archive_audio_path,
+            sample_rate=settings.upload.audio.analysis_sample_rate_hz,
+            archive_bitrate=settings.upload.audio.archive_bitrate_kbps * 1_000,
+        )
+        analysis_duration = inspect_audio(analysis_audio_path, ".wav")
+        archive_duration = inspect_audio(archive_audio_path, ".m4a")
+        duration_difference = max(
+            abs(normalized_duration - analysis_duration),
+            abs(normalized_duration - archive_duration),
+        )
+        if duration_difference > max(1.0, normalized_duration * 0.005):
+            raise AudioNormalizationError(
+                "변환된 오디오의 재생시간이 원본과 일치하지 않습니다."
+            )
+
+        source_audio_path.unlink(missing_ok=True)
+        set_job(
+            job_id,
+            audio_path=str(analysis_audio_path),
+            archive_audio_path=str(archive_audio_path),
+            stage="gpu_starting",
+            progress=4,
+            message="오디오 변환이 완료되어 GPU 분석을 시작합니다.",
+        )
         result = transcribe_meeting(
-            Path(job["audio_path"]), Path(job["meta_dir"]), progress_callback(job_id)
+            analysis_audio_path, Path(job["meta_dir"]), progress_callback(job_id)
         )
         write_json_artifact(Path(job["meta_dir"]) / "result.json", result)
         set_job(job_id, result=result)
@@ -1283,6 +1315,8 @@ def run_gpu_job(job_id: str):
         set_job(job_id, status="failed", stage="gpu_failed", progress=100,
                 message=str(exc), error_message=str(exc))
         finish_pipeline_job(job_id)
+    finally:
+        analysis_audio_path.unlink(missing_ok=True)
 
 
 def run_llm_job(job_id: str):
@@ -2174,7 +2208,7 @@ def create_job(
             directory.mkdir(parents=True, exist_ok=True)
 
         budget = RequestBudget(settings.upload.request_max_mb * MB)
-        audio_path = audio_dir / f"audio{audio_extension}"
+        audio_path = audio_dir / f"source{audio_extension}"
         copy_upload_limited(
             audio,
             audio_path,
@@ -2257,6 +2291,7 @@ def create_job(
                 "message": "작업 대기 중입니다.",
                 "logs": [],
                 "audio_path": str(audio_path),
+                "source_audio_path": str(audio_path),
                 "output_dir": str(output_dir),
                 "persist_dir": str(persist_dir),
                 "meta_dir": str(meta_dir),

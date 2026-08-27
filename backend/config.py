@@ -17,6 +17,8 @@ class AudioLimits(StrictConfig):
     max_size_mb: int = Field(ge=1)
     max_duration_minutes: int = Field(ge=1)
     validation_timeout_seconds: int = Field(ge=1, le=300)
+    analysis_sample_rate_hz: int = Field(ge=8_000, le=48_000)
+    archive_bitrate_kbps: int = Field(ge=32, le=320)
     allowed_extensions: tuple[str, ...]
 
     @field_validator("allowed_extensions")

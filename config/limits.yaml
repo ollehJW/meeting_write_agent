@@ -4,6 +4,8 @@ upload:
     max_size_mb: 500
     max_duration_minutes: 180
     validation_timeout_seconds: 60
+    analysis_sample_rate_hz: 16000
+    archive_bitrate_kbps: 64
     allowed_extensions:
       - .webm
       - .m4a
